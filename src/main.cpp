@@ -3,73 +3,31 @@
 #include <avr/boot.h>
 #include <avr/wdt.h>
 #include <ctype.h>
+#include <stdlib.h>
 #include <string.h>
 
 extern "C" char __heap_start;
 extern "C" void *__brkval;
 
-/*
-ATmega328P Xplained Mini demo
-Board peripherals used:
-- User LED (PB5 / D13)
-- User push button (PB7 / D21), active-low
-- mEDBG virtual COM port via UART (PD0/PD1) using Serial
-*/
+/* ATmega328P Xplained Mini serial command shell */
 
 namespace {
-
-constexpr uint8_t kLedPin = LED_BUILTIN; // PB5 / D13
-#if defined(PIN_PB7)
-constexpr uint8_t kButtonPin = PIN_PB7; // PB7 / D21
-#else
-constexpr uint8_t kButtonPin = 21;
-#endif
 
 #ifndef DEMO_BAUD
 #define DEMO_BAUD 57600UL
 #endif
 constexpr uint32_t kBaudRate = DEMO_BAUD;
-constexpr uint32_t kDebounceMs = 25;
-constexpr uint32_t kLongPressMs = 1200;
 constexpr size_t kCmdBufferSize = 64;
 constexpr size_t kHistorySize = 8;
+constexpr uint16_t kWatchPeriodMs = 200;
+constexpr uint8_t kUserAnalogCount = 6; // A0..A5 for this shell
 constexpr char kPrompt[] = "arduino$ ";
 constexpr char kBoardName[] = "ATmega328P Xplained Mini";
 #ifndef FW_VERSION
 #define FW_VERSION "1.1.0"
 #endif
 
-struct HeartbeatPhase {
-  bool level;
-  uint16_t durationMs;
-};
-
-constexpr HeartbeatPhase kHeartbeatPattern[] = {
-  {true, 70},  // beat 1
-  {false, 120},
-  {true, 70},  // beat 2
-  {false, 740} // pause before next heartbeat
-};
-constexpr size_t kHeartbeatPatternLen = sizeof(kHeartbeatPattern) / sizeof(kHeartbeatPattern[0]);
 enum class EscState : uint8_t { None, SeenEsc, SeenEscBracket };
-
-enum class LedMode : uint8_t { Heartbeat, On, Off };
-
-LedMode gLedMode = LedMode::Heartbeat;
-bool gHeartbeatLevel = false;
-bool gLedOutputLevel = false;
-uint32_t gLastHeartbeatMs = 0;
-size_t gHeartbeatPhase = 0;
-
-bool gLastButtonSample = HIGH;
-bool gStableButtonState = HIGH;
-uint32_t gLastDebounceMs = 0;
-uint32_t gPressStartMs = 0;
-bool gLongPressReported = false;
-
-uint32_t gPressCount = 0;
-uint32_t gReleaseCount = 0;
-uint32_t gLongPressCount = 0;
 uint8_t gResetFlags = 0;
 
 char gCmdBuffer[kCmdBufferSize];
@@ -81,8 +39,6 @@ int gHistoryCursor = -1;
 char gEditBackup[kCmdBufferSize];
 size_t gEditBackupLen = 0;
 EscState gEscState = EscState::None;
-
-bool buttonIsPressed() { return gStableButtonState == LOW; }
 
 void printPrompt() { Serial.print(kPrompt); }
 
@@ -199,6 +155,108 @@ bool startsWithIgnoreCase(const char *text, const char *prefix) {
   return true;
 }
 
+size_t splitArgs(char *text, char *argv[], size_t maxArgs) {
+  size_t argc = 0;
+  char *p = text;
+  while (*p != '\0' && argc < maxArgs) {
+    while (*p == ' ') {
+      ++p;
+    }
+    if (*p == '\0') {
+      break;
+    }
+    argv[argc++] = p;
+    while (*p != '\0' && *p != ' ') {
+      ++p;
+    }
+    if (*p == ' ') {
+      *p = '\0';
+      ++p;
+    }
+  }
+  return argc;
+}
+
+bool parseUnsigned(const char *token, unsigned long &value) {
+  if (token == nullptr || *token == '\0') {
+    return false;
+  }
+  char *end = nullptr;
+  value = strtoul(token, &end, 10);
+  return *end == '\0';
+}
+
+bool parsePinToken(const char *token, int &pin) {
+  if (token == nullptr || *token == '\0') {
+    return false;
+  }
+  if (token[0] == 'a' || token[0] == 'A') {
+    unsigned long idx = 0;
+    if (!parseUnsigned(token + 1, idx) || idx >= kUserAnalogCount) {
+      return false;
+    }
+    pin = A0 + static_cast<int>(idx);
+    return true;
+  }
+
+  unsigned long rawPin = 0;
+  if (!parseUnsigned(token, rawPin) || rawPin >= NUM_DIGITAL_PINS) {
+    return false;
+  }
+  pin = static_cast<int>(rawPin);
+  return true;
+}
+
+bool parseAnalogPinToken(const char *token, uint8_t &analogIndex, int &pin) {
+  if (token == nullptr || *token == '\0') {
+    return false;
+  }
+
+  if (token[0] == 'a' || token[0] == 'A') {
+    unsigned long idx = 0;
+    if (!parseUnsigned(token + 1, idx) || idx >= kUserAnalogCount) {
+      return false;
+    }
+    analogIndex = static_cast<uint8_t>(idx);
+    pin = A0 + static_cast<int>(idx);
+    return true;
+  }
+
+  unsigned long raw = 0;
+  if (!parseUnsigned(token, raw)) {
+    return false;
+  }
+  if (raw < kUserAnalogCount) {
+    analogIndex = static_cast<uint8_t>(raw);
+    pin = A0 + static_cast<int>(raw);
+    return true;
+  }
+  if (raw >= A0 && raw < (A0 + kUserAnalogCount)) {
+    analogIndex = static_cast<uint8_t>(raw - A0);
+    pin = static_cast<int>(raw);
+    return true;
+  }
+  return false;
+}
+
+void printPinLabel(int pin) {
+  if (pin >= A0 && pin < (A0 + kUserAnalogCount)) {
+    Serial.print('A');
+    Serial.print(pin - A0);
+    Serial.print(F("/"));
+  }
+  Serial.print('D');
+  Serial.print(pin);
+}
+
+bool isPwmCapablePin(int pin) {
+#if defined(digitalPinHasPWM)
+  return digitalPinHasPWM(pin);
+#else
+  return pin == 3 || pin == 5 || pin == 6 || pin == 9 || pin == 10 || pin == 11;
+#endif
+}
+
 void setCmdBuffer(const char *text) {
   strncpy(gCmdBuffer, text, kCmdBufferSize - 1);
   gCmdBuffer[kCmdBufferSize - 1] = '\0';
@@ -289,24 +347,6 @@ void historyDown() {
   redrawInputLine(previousLen);
 }
 
-void resetHeartbeat() {
-  gHeartbeatPhase = 0;
-  gHeartbeatLevel = kHeartbeatPattern[gHeartbeatPhase].level;
-  gLastHeartbeatMs = millis();
-}
-
-const __FlashStringHelper *ledModeName(LedMode mode) {
-  switch (mode) {
-    case LedMode::Heartbeat:
-      return F("heartbeat");
-    case LedMode::On:
-      return F("on");
-    case LedMode::Off:
-      return F("off");
-  }
-  return F("unknown");
-}
-
 void printHelp() {
   Serial.println(F("\nCommands:"));
   Serial.println(F("  help                - show this help"));
@@ -317,9 +357,15 @@ void printHelp() {
   Serial.println(F("  free                - free RAM estimate"));
   Serial.println(F("  reset               - watchdog software reset"));
   Serial.println(F("  echo <text>         - echo text back"));
-  Serial.println(F("  led on|off|hb       - set LED mode"));
-  Serial.println(F("  led toggle          - toggle ON/OFF mode"));
-  Serial.println(F("  counters reset      - reset button counters"));
+  Serial.println(F("  pinmode <pin> <in|out|pullup>"));
+  Serial.println(F("  digitalread <pin>"));
+  Serial.println(F("  digitalwrite <pin> <0|1>"));
+  Serial.println(F("  analogread <A0-A5>"));
+  Serial.println(F("  pwm <pin> <0-255>"));
+  Serial.println(F("  tone <pin> <freq> [ms]"));
+  Serial.println(F("  notone <pin>"));
+  Serial.println(F("  pulse <pin> <count> <high_ms> <low_ms>"));
+  Serial.println(F("  watch <pin>         - press any key to stop"));
   Serial.println();
 }
 
@@ -331,18 +377,8 @@ void printStatus() {
   Serial.print(F(" ("));
   printUptimeFormatted(upMs);
   Serial.println(F(")"));
-  Serial.print(F("LED mode: "));
-  Serial.println(ledModeName(gLedMode));
-  Serial.print(F("LED level: "));
-  Serial.println(gLedOutputLevel ? F("HIGH") : F("LOW"));
-  Serial.print(F("Button: "));
-  Serial.println(buttonIsPressed() ? F("PRESSED") : F("released"));
-  Serial.print(F("Presses: "));
-  Serial.println(gPressCount);
-  Serial.print(F("Releases: "));
-  Serial.println(gReleaseCount);
-  Serial.print(F("Long presses: "));
-  Serial.println(gLongPressCount);
+  Serial.print(F("Free RAM [bytes]: "));
+  Serial.println(freeRamEstimate());
   Serial.println(F("============================\n"));
 }
 
@@ -371,15 +407,6 @@ void normalize(char *s) {
     --w;
   }
   s[w] = '\0';
-}
-
-void setLedMode(LedMode mode) {
-  gLedMode = mode;
-  if (gLedMode == LedMode::Heartbeat) {
-    resetHeartbeat();
-  }
-  Serial.print(F("LED mode -> "));
-  Serial.println(ledModeName(gLedMode));
 }
 
 void handleCommand(char *line) {
@@ -489,32 +516,273 @@ void handleCommand(char *line) {
     Serial.println(text);
     return;
   }
-  if (strcmp(cmd, "led on") == 0) {
-    setLedMode(LedMode::On);
-    return;
-  }
-  if (strcmp(cmd, "led off") == 0) {
-    setLedMode(LedMode::Off);
-    return;
-  }
-  if (strcmp(cmd, "led hb") == 0 || strcmp(cmd, "led heartbeat") == 0) {
-    setLedMode(LedMode::Heartbeat);
-    return;
-  }
-  if (strcmp(cmd, "led toggle") == 0) {
-    if (gLedMode == LedMode::On) {
-      setLedMode(LedMode::Off);
-    } else {
-      setLedMode(LedMode::On);
+
+  char cmdArgs[kCmdBufferSize];
+  strncpy(cmdArgs, cmd, kCmdBufferSize - 1);
+  cmdArgs[kCmdBufferSize - 1] = '\0';
+  char *argv[8] = {};
+  const size_t argc = splitArgs(cmdArgs, argv, 8);
+
+  if (argc > 0 && strcmp(argv[0], "pinmode") == 0) {
+    if (argc != 3) {
+      Serial.println(F("Usage: pinmode <pin> <in|out|pullup>"));
+      return;
     }
+    int pin = -1;
+    if (!parsePinToken(argv[1], pin)) {
+      Serial.println(F("Invalid pin. Use D0-D22 or A0-A5."));
+      return;
+    }
+    if (strcmp(argv[2], "in") == 0 || strcmp(argv[2], "input") == 0) {
+      pinMode(pin, INPUT);
+      Serial.print(F("pinMode "));
+      printPinLabel(pin);
+      Serial.println(F(" -> INPUT"));
+      return;
+    }
+    if (strcmp(argv[2], "out") == 0 || strcmp(argv[2], "output") == 0) {
+      pinMode(pin, OUTPUT);
+      Serial.print(F("pinMode "));
+      printPinLabel(pin);
+      Serial.println(F(" -> OUTPUT"));
+      return;
+    }
+    if (strcmp(argv[2], "pullup") == 0 || strcmp(argv[2], "input_pullup") == 0) {
+      pinMode(pin, INPUT_PULLUP);
+      Serial.print(F("pinMode "));
+      printPinLabel(pin);
+      Serial.println(F(" -> INPUT_PULLUP"));
+      return;
+    }
+    Serial.println(F("Invalid mode. Use in|out|pullup."));
     return;
   }
-  if (strcmp(cmd, "counters reset") == 0) {
-    gPressCount = 0;
-    gReleaseCount = 0;
-    gLongPressCount = 0;
-    Serial.println(F("Counters reset."));
+
+  if (argc > 0 && strcmp(argv[0], "digitalread") == 0) {
+    if (argc != 2) {
+      Serial.println(F("Usage: digitalread <pin>"));
+      return;
+    }
+    int pin = -1;
+    if (!parsePinToken(argv[1], pin)) {
+      Serial.println(F("Invalid pin. Use D0-D22 or A0-A5."));
+      return;
+    }
+    const int value = digitalRead(pin);
+    printPinLabel(pin);
+    Serial.print(F(" = "));
+    Serial.print(value ? F("HIGH") : F("LOW"));
+    Serial.print(F(" ("));
+    Serial.print(value ? 1 : 0);
+    Serial.println(F(")"));
     return;
+  }
+
+  if (argc > 0 && strcmp(argv[0], "digitalwrite") == 0) {
+    if (argc != 3) {
+      Serial.println(F("Usage: digitalwrite <pin> <0|1>"));
+      return;
+    }
+    int pin = -1;
+    if (!parsePinToken(argv[1], pin)) {
+      Serial.println(F("Invalid pin. Use D0-D22 or A0-A5."));
+      return;
+    }
+    unsigned long bit = 0;
+    if (!parseUnsigned(argv[2], bit) || bit > 1) {
+      Serial.println(F("Invalid value. Use 0 or 1."));
+      return;
+    }
+    pinMode(pin, OUTPUT);
+    digitalWrite(pin, bit ? HIGH : LOW);
+    printPinLabel(pin);
+    Serial.print(F(" <= "));
+    Serial.println(bit ? F("HIGH") : F("LOW"));
+    return;
+  }
+
+  if (argc > 0 && strcmp(argv[0], "analogread") == 0) {
+    if (argc != 2) {
+      Serial.println(F("Usage: analogread <A0-A5>"));
+      return;
+    }
+    uint8_t analogIndex = 0;
+    int pin = -1;
+    if (!parseAnalogPinToken(argv[1], analogIndex, pin)) {
+      Serial.println(F("Invalid analog pin. Use A0-A5."));
+      return;
+    }
+    const int value = analogRead(pin);
+    Serial.print(F("A"));
+    Serial.print(analogIndex);
+    Serial.print(F(" = "));
+    Serial.println(value);
+    return;
+  }
+
+  if (argc > 0 && strcmp(argv[0], "pwm") == 0) {
+    if (argc != 3) {
+      Serial.println(F("Usage: pwm <pin> <0-255>"));
+      return;
+    }
+    int pin = -1;
+    if (!parsePinToken(argv[1], pin)) {
+      Serial.println(F("Invalid pin. Use D0-D22 or A0-A5."));
+      return;
+    }
+    if (!isPwmCapablePin(pin)) {
+      Serial.println(F("Pin is not PWM-capable. Use D3,D5,D6,D9,D10,D11."));
+      return;
+    }
+    unsigned long level = 0;
+    if (!parseUnsigned(argv[2], level) || level > 255UL) {
+      Serial.println(F("Invalid value. Use 0..255."));
+      return;
+    }
+    pinMode(pin, OUTPUT);
+    analogWrite(pin, static_cast<uint8_t>(level));
+    printPinLabel(pin);
+    Serial.print(F(" PWM <= "));
+    Serial.println(level);
+    return;
+  }
+
+  if (argc > 0 && strcmp(argv[0], "tone") == 0) {
+    if (argc != 3 && argc != 4) {
+      Serial.println(F("Usage: tone <pin> <freq> [ms]"));
+      return;
+    }
+    int pin = -1;
+    if (!parsePinToken(argv[1], pin)) {
+      Serial.println(F("Invalid pin. Use D0-D22 or A0-A5."));
+      return;
+    }
+    unsigned long freq = 0;
+    if (!parseUnsigned(argv[2], freq) || freq == 0 || freq > 65535UL) {
+      Serial.println(F("Invalid freq. Use 1..65535 Hz."));
+      return;
+    }
+
+    if (argc == 4) {
+      unsigned long durMs = 0;
+      if (!parseUnsigned(argv[3], durMs)) {
+        Serial.println(F("Invalid duration ms."));
+        return;
+      }
+      tone(pin, static_cast<unsigned int>(freq), static_cast<unsigned long>(durMs));
+      printPinLabel(pin);
+      Serial.print(F(" tone "));
+      Serial.print(freq);
+      Serial.print(F(" Hz for "));
+      Serial.print(durMs);
+      Serial.println(F(" ms"));
+      return;
+    }
+
+    tone(pin, static_cast<unsigned int>(freq));
+    printPinLabel(pin);
+    Serial.print(F(" tone "));
+    Serial.print(freq);
+    Serial.println(F(" Hz"));
+    return;
+  }
+
+  if (argc > 0 && strcmp(argv[0], "notone") == 0) {
+    if (argc != 2) {
+      Serial.println(F("Usage: notone <pin>"));
+      return;
+    }
+    int pin = -1;
+    if (!parsePinToken(argv[1], pin)) {
+      Serial.println(F("Invalid pin. Use D0-D22 or A0-A5."));
+      return;
+    }
+    noTone(pin);
+    printPinLabel(pin);
+    Serial.println(F(" tone OFF"));
+    return;
+  }
+
+  if (argc > 0 && strcmp(argv[0], "pulse") == 0) {
+    if (argc != 5) {
+      Serial.println(F("Usage: pulse <pin> <count> <high_ms> <low_ms>"));
+      return;
+    }
+    int pin = -1;
+    if (!parsePinToken(argv[1], pin)) {
+      Serial.println(F("Invalid pin. Use D0-D22 or A0-A5."));
+      return;
+    }
+    unsigned long count = 0;
+    unsigned long highMs = 0;
+    unsigned long lowMs = 0;
+    if (!parseUnsigned(argv[2], count) || count == 0) {
+      Serial.println(F("Invalid count. Use >= 1."));
+      return;
+    }
+    if (!parseUnsigned(argv[3], highMs) || !parseUnsigned(argv[4], lowMs)) {
+      Serial.println(F("Invalid timing values."));
+      return;
+    }
+
+    pinMode(pin, OUTPUT);
+    for (unsigned long i = 0; i < count; ++i) {
+      digitalWrite(pin, HIGH);
+      delay(highMs);
+      digitalWrite(pin, LOW);
+      if (i + 1 < count) {
+        delay(lowMs);
+      }
+      if (Serial.available() > 0) {
+        while (Serial.available() > 0) {
+          Serial.read();
+        }
+        Serial.println(F("Pulse aborted by keypress."));
+        return;
+      }
+    }
+    Serial.println(F("Pulse completed."));
+    return;
+  }
+
+  if (argc > 0 && strcmp(argv[0], "watch") == 0) {
+    if (argc != 2) {
+      Serial.println(F("Usage: watch <pin>"));
+      return;
+    }
+    int pin = -1;
+    if (!parsePinToken(argv[1], pin)) {
+      Serial.println(F("Invalid pin. Use D0-D22 or A0-A5."));
+      return;
+    }
+    while (Serial.available() > 0) {
+      Serial.read();
+    }
+
+    Serial.print(F("Watching "));
+    printPinLabel(pin);
+    Serial.println(F(" every 200 ms. Press any key to stop."));
+    while (true) {
+      const int value = digitalRead(pin);
+      printPinLabel(pin);
+      Serial.print(F(" = "));
+      Serial.print(value ? F("HIGH") : F("LOW"));
+      Serial.print(F(" @ "));
+      Serial.print(millis());
+      Serial.println(F(" ms"));
+
+      const uint32_t start = millis();
+      while ((millis() - start) < kWatchPeriodMs) {
+        if (Serial.available() > 0) {
+          while (Serial.available() > 0) {
+            Serial.read();
+          }
+          Serial.println(F("Watch stopped."));
+          return;
+        }
+        delay(5);
+      }
+    }
   }
 
   Serial.print(F("Unknown command: "));
@@ -576,89 +844,10 @@ void updateSerial() {
   }
 }
 
-void updateButton() {
-  const uint32_t now = millis();
-  const bool sample = digitalRead(kButtonPin);
-
-  if (sample != gLastButtonSample) {
-    gLastButtonSample = sample;
-    gLastDebounceMs = now;
-  }
-
-  if ((now - gLastDebounceMs) >= kDebounceMs && gStableButtonState != gLastButtonSample) {
-    gStableButtonState = gLastButtonSample;
-
-    if (buttonIsPressed()) {
-      gPressStartMs = now;
-      gLongPressReported = false;
-      ++gPressCount;
-      Serial.println(F("[BTN] pressed"));
-      printPrompt();
-    } else {
-      const uint32_t heldMs = now - gPressStartMs;
-      ++gReleaseCount;
-      Serial.print(F("[BTN] released after "));
-      Serial.print(heldMs);
-      Serial.println(F(" ms"));
-      printPrompt();
-    }
-  }
-
-  if (buttonIsPressed() && !gLongPressReported && (now - gPressStartMs) >= kLongPressMs) {
-    gLongPressReported = true;
-    ++gLongPressCount;
-    Serial.println(F("[BTN] long press -> LED mode heartbeat"));
-    gLedMode = LedMode::Heartbeat;
-    resetHeartbeat();
-    printPrompt();
-  }
-}
-
-void updateHeartbeat() {
-  const uint32_t now = millis();
-  if ((now - gLastHeartbeatMs) >= kHeartbeatPattern[gHeartbeatPhase].durationMs) {
-    gHeartbeatPhase = (gHeartbeatPhase + 1) % kHeartbeatPatternLen;
-    gHeartbeatLevel = kHeartbeatPattern[gHeartbeatPhase].level;
-    gLastHeartbeatMs = now;
-  }
-}
-
-void updateLed() {
-  bool led = false;
-
-  switch (gLedMode) {
-    case LedMode::Heartbeat:
-      led = gHeartbeatLevel;
-      break;
-    case LedMode::On:
-      led = true;
-      break;
-    case LedMode::Off:
-      led = false;
-      break;
-  }
-
-  // While the button is held, force the LED on to make interaction obvious.
-  if (buttonIsPressed()) {
-    led = true;
-  }
-
-  gLedOutputLevel = led;
-  digitalWrite(kLedPin, led ? HIGH : LOW);
-}
-
 } // namespace
 
 void setup() {
   captureResetFlags();
-  pinMode(kLedPin, OUTPUT);
-  pinMode(kButtonPin, INPUT_PULLUP);
-  digitalWrite(kLedPin, LOW);
-
-  gLastButtonSample = digitalRead(kButtonPin);
-  gStableButtonState = gLastButtonSample;
-  gLastDebounceMs = millis();
-  resetHeartbeat();
 
   Serial.begin(kBaudRate);
   delay(200);
@@ -671,19 +860,10 @@ void setup() {
   Serial.print(F(__DATE__));
   Serial.write(' ');
   Serial.println(F(__TIME__));
-  Serial.print(F("LED pin: D"));
-  Serial.println(kLedPin);
-  Serial.print(F("Button pin: D"));
-  Serial.println(kButtonPin);
-  Serial.println(F("Button is active LOW (pressed = 0)."));
-  Serial.println(F("Long press (>1.2s) resets LED mode to heartbeat."));
   printHelp();
   printPrompt();
 }
 
 void loop() {
   updateSerial();
-  updateButton();
-  updateHeartbeat();
-  updateLed();
 }
