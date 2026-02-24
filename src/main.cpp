@@ -51,9 +51,35 @@ constexpr char kBoardName[] = "ATmega328P Xplained Mini";
 #define FW_VERSION "1.1.0"
 #endif
 
+#ifndef FEATURE_I2C
+#define FEATURE_I2C 1
+#endif
+
+#ifndef FEATURE_EEPROM
+#define FEATURE_EEPROM 1
+#endif
+
+#ifndef FEATURE_FS
+#define FEATURE_FS 1
+#endif
+
+#ifndef FEATURE_TONE
+#define FEATURE_TONE 1
+#endif
+
+#ifndef FEATURE_LOWLEVEL
+#define FEATURE_LOWLEVEL 1
+#endif
+
+#if FEATURE_FS && !FEATURE_EEPROM
+#error "FEATURE_FS requires FEATURE_EEPROM=1"
+#endif
+
 enum class EscState : uint8_t { None, SeenEsc, SeenEscBracket };
 uint8_t gResetFlags = 0;
+#if FEATURE_I2C
 uint32_t gI2cClockHz = kI2cSpeed100kHz;
+#endif
 
 char gCmdBuffer[kCmdBufferSize];
 size_t gCmdLen = 0;
@@ -259,6 +285,7 @@ bool parseByteValue(const char *token, uint8_t &value) {
   return true;
 }
 
+#if FEATURE_LOWLEVEL
 bool parseAddressValue(const char *token, uint16_t &value) {
   unsigned long raw = 0;
   if (!parseUnsignedAuto(token, raw) || raw > 0xFFFFUL) {
@@ -267,7 +294,9 @@ bool parseAddressValue(const char *token, uint16_t &value) {
   value = static_cast<uint16_t>(raw);
   return true;
 }
+#endif
 
+#if FEATURE_I2C
 bool parseI2cAddress(const char *token, uint8_t &address) {
   uint8_t raw = 0;
   if (!parseByteValue(token, raw) || raw > 0x7FU) {
@@ -303,9 +332,11 @@ bool parseI2cLen(const char *token, uint8_t &length) {
   length = static_cast<uint8_t>(raw);
   return true;
 }
+#endif
 
 size_t eepromSize() { return static_cast<size_t>(EEPROM.length()); }
 
+#if FEATURE_EEPROM
 bool parseEepromAddress(const char *token, uint16_t &address) {
   unsigned long raw = 0;
   if (!parseUnsignedAuto(token, raw)) {
@@ -329,6 +360,7 @@ bool parseEepromLen(const char *token, size_t &length) {
   length = static_cast<size_t>(raw);
   return true;
 }
+#endif
 
 uint16_t eepromReadU16(size_t addr) {
   const uint16_t lo = EEPROM.read(static_cast<int>(addr));
@@ -475,11 +507,13 @@ void fsFormat() {
   }
 }
 
+#if FEATURE_FS
 void fsEnsureInitialized() {
   if (!fsIsFormatted()) {
     fsFormat();
   }
 }
+#endif
 
 bool fsFindChild(uint8_t parent, const char *name, uint8_t &indexOut, FsEntry &entryOut) {
   for (uint8_t i = 0; i < kFsMaxEntries; ++i) {
@@ -651,6 +685,7 @@ bool fsSplitParentLeaf(const char *path, char *parentOut, size_t parentOutSize, 
   return true;
 }
 
+#if FEATURE_I2C
 void setI2cClock(uint32_t hz) {
 #if defined(TWBR) && defined(TWPS0) && defined(TWPS1) && defined(F_CPU)
   // Force prescaler=1 and compute TWBR from AVR datasheet formula.
@@ -662,7 +697,9 @@ void setI2cClock(uint32_t hz) {
 #endif
   gI2cClockHz = hz;
 }
+#endif
 
+#if FEATURE_I2C
 void printI2cAddress(uint8_t address) {
   Serial.print(F("0x"));
   printHexByte(address);
@@ -694,7 +731,9 @@ void printI2cTxStatus(uint8_t status) {
   }
   Serial.println(F(")"));
 }
+#endif
 
+#if FEATURE_LOWLEVEL
 enum class PortId : uint8_t { B, C, D };
 
 bool parsePortId(const char *token, PortId &port) {
@@ -767,6 +806,7 @@ volatile uint8_t &pinForPort(PortId port) {
   }
   return PINB;
 }
+#endif
 
 bool parsePinToken(const char *token, int &pin) {
   if (token == nullptr || *token == '\0') {
@@ -942,32 +982,42 @@ void printHelp() {
   Serial.println(F("  micros              - current micros()"));
   Serial.println(F("  delay <ms>          - blocking delay"));
   Serial.println(F("  freq <pin> [ms]     - estimate input frequency"));
+#if FEATURE_I2C
   Serial.println(F("  i2cscan             - scan I2C bus"));
   Serial.println(F("  i2cspeed <100k|400k>"));
   Serial.println(F("  i2cread <addr> <n>"));
   Serial.println(F("  i2cwrite <addr> <bytes...>"));
   Serial.println(F("  i2cwr <addr> <reg> <bytes...>"));
   Serial.println(F("  i2crr <addr> <reg> <n>"));
+#endif
+#if FEATURE_EEPROM
   Serial.println(F("  eepread <addr> [len]"));
   Serial.println(F("  eepwrite <addr> <bytes...>"));
   Serial.println(F("  eeperase confirm    - clear EEPROM"));
+#endif
+#if FEATURE_FS
   Serial.println(F("  fs ...              - EEPROM mini filesystem"));
   Serial.println(F("    fs help           - filesystem commands"));
+#endif
   Serial.println(F("  pinmode <pin> <in|out|pullup>"));
   Serial.println(F("  digitalread <pin>"));
   Serial.println(F("  digitalwrite <pin> <0|1>"));
   Serial.println(F("  analogread <A0-A5>"));
   Serial.println(F("  pwm <pin> <0-255>"));
+#if FEATURE_TONE
   Serial.println(F("  tone <pin> <freq> [ms]"));
   Serial.println(F("  notone <pin>"));
+#endif
   Serial.println(F("  pulse <pin> <count> <high_ms> <low_ms>"));
   Serial.println(F("  watch <pin>         - press any key to stop"));
+#if FEATURE_LOWLEVEL
   Serial.println(F("  ddr <port> [value]  - view/set DDRx"));
   Serial.println(F("  port <port> [value] - view/set PORTx"));
   Serial.println(F("  pin <port>          - read PINx"));
   Serial.println(F("  peek <addr>         - read memory byte"));
   Serial.println(F("  poke <addr> <val>   - write memory byte"));
   Serial.println(F("  reg                 - dump AVR core registers"));
+#endif
   Serial.println();
 }
 
@@ -1011,6 +1061,7 @@ void normalize(char *s) {
   s[w] = '\0';
 }
 
+#if FEATURE_FS
 void printFsHelp() {
   Serial.println(F("\nFS commands:"));
   Serial.println(F("  fs help"));
@@ -1414,6 +1465,7 @@ void handleFsCommand(const char *rawLine) {
 
   Serial.println(F("Unknown fs command. Use 'fs help'."));
 }
+#endif
 
 void handleCommand(char *line) {
   char raw[kCmdBufferSize];
@@ -1435,6 +1487,7 @@ void handleCommand(char *line) {
     return;
   }
 
+#if FEATURE_FS
   if (startsWithIgnoreCase(trimmed, "fs")) {
     const char next = trimmed[2];
     if (next == '\0' || isspace(static_cast<unsigned char>(next))) {
@@ -1442,6 +1495,7 @@ void handleCommand(char *line) {
       return;
     }
   }
+#endif
 
   char cmd[kCmdBufferSize];
   strncpy(cmd, trimmed, kCmdBufferSize - 1);
@@ -1542,6 +1596,7 @@ void handleCommand(char *line) {
   char *argv[kMaxArgs] = {};
   const size_t argc = splitArgs(cmdArgs, argv, kMaxArgs);
 
+#if FEATURE_I2C
   if (argc > 0 && strcmp(argv[0], "i2cspeed") == 0) {
     if (argc != 2) {
       Serial.println(F("Usage: i2cspeed <100k|400k>"));
@@ -1796,7 +1851,9 @@ void handleCommand(char *line) {
     }
     return;
   }
+#endif
 
+#if FEATURE_EEPROM
   if (argc > 0 && strcmp(argv[0], "eepread") == 0) {
     if (argc != 2 && argc != 3) {
       Serial.println(F("Usage: eepread <addr> [len]"));
@@ -1908,6 +1965,7 @@ void handleCommand(char *line) {
     Serial.println(F(" bytes)."));
     return;
   }
+#endif
 
   if (argc > 0 && strcmp(argv[0], "pinmode") == 0) {
     if (argc != 3) {
@@ -2121,6 +2179,7 @@ void handleCommand(char *line) {
     return;
   }
 
+#if FEATURE_TONE
   if (argc > 0 && strcmp(argv[0], "tone") == 0) {
     if (argc != 3 && argc != 4) {
       Serial.println(F("Usage: tone <pin> <freq> [ms]"));
@@ -2176,6 +2235,7 @@ void handleCommand(char *line) {
     Serial.println(F(" tone OFF"));
     return;
   }
+#endif
 
   if (argc > 0 && strcmp(argv[0], "pulse") == 0) {
     if (argc != 5) {
@@ -2259,6 +2319,7 @@ void handleCommand(char *line) {
     }
   }
 
+#if FEATURE_LOWLEVEL
   if (argc > 0 && strcmp(argv[0], "ddr") == 0) {
     if (argc != 2 && argc != 3) {
       Serial.println(F("Usage: ddr <port> [value]"));
@@ -2455,6 +2516,7 @@ void handleCommand(char *line) {
     Serial.println(F("=====================\n"));
     return;
   }
+#endif
 
   Serial.print(F("Unknown command: "));
   Serial.println(trimmed);
@@ -2519,11 +2581,15 @@ void updateSerial() {
 
 void setup() {
   captureResetFlags();
+#if FEATURE_FS
   fsEnsureInitialized();
+#endif
 
   Serial.begin(kBaudRate);
+#if FEATURE_I2C
   Wire.begin();
   setI2cClock(gI2cClockHz);
+#endif
   delay(200);
 
   Serial.println(F("\nATmega328P Xplained Mini command shell"));
