@@ -20,6 +20,9 @@ constexpr uint32_t kBaudRate = DEMO_BAUD;
 constexpr size_t kCmdBufferSize = 64;
 constexpr size_t kHistorySize = 8;
 constexpr uint16_t kWatchPeriodMs = 200;
+constexpr uint16_t kDefaultFreqWindowMs = 250;
+constexpr uint16_t kMinFreqWindowMs = 10;
+constexpr uint16_t kMaxFreqWindowMs = 10000;
 constexpr uint8_t kUserAnalogCount = 6; // A0..A5 for this shell
 constexpr char kPrompt[] = "arduino$ ";
 constexpr char kBoardName[] = "ATmega328P Xplained Mini";
@@ -462,6 +465,9 @@ void printHelp() {
   Serial.println(F("  free                - free RAM estimate"));
   Serial.println(F("  reset               - watchdog software reset"));
   Serial.println(F("  echo <text>         - echo text back"));
+  Serial.println(F("  micros              - current micros()"));
+  Serial.println(F("  delay <ms>          - blocking delay"));
+  Serial.println(F("  freq <pin> [ms]     - estimate input frequency"));
   Serial.println(F("  pinmode <pin> <in|out|pullup>"));
   Serial.println(F("  digitalread <pin>"));
   Serial.println(F("  digitalwrite <pin> <0|1>"));
@@ -605,6 +611,11 @@ void handleCommand(char *line) {
     Serial.println(F(" bytes"));
     return;
   }
+  if (strcmp(cmd, "micros") == 0) {
+    Serial.print(F("micros(): "));
+    Serial.println(micros());
+    return;
+  }
   if (strcmp(cmd, "reset") == 0) {
     Serial.println(F("Resetting via watchdog..."));
     Serial.flush();
@@ -666,6 +677,94 @@ void handleCommand(char *line) {
       return;
     }
     Serial.println(F("Invalid mode. Use in|out|pullup."));
+    return;
+  }
+
+  if (argc > 0 && strcmp(argv[0], "delay") == 0) {
+    if (argc != 2) {
+      Serial.println(F("Usage: delay <ms>"));
+      return;
+    }
+    unsigned long delayMs = 0;
+    if (!parseUnsignedAuto(argv[1], delayMs) || delayMs > 600000UL) {
+      Serial.println(F("Invalid delay. Use 0..600000 ms."));
+      return;
+    }
+    Serial.print(F("Delaying "));
+    Serial.print(delayMs);
+    Serial.println(F(" ms..."));
+    delay(delayMs);
+    Serial.println(F("Done."));
+    return;
+  }
+
+  if (argc > 0 && strcmp(argv[0], "freq") == 0) {
+    if (argc != 2 && argc != 3) {
+      Serial.println(F("Usage: freq <pin> [ms]"));
+      Serial.print(F("Window: "));
+      Serial.print(kMinFreqWindowMs);
+      Serial.print(F(".."));
+      Serial.print(kMaxFreqWindowMs);
+      Serial.println(F(" ms"));
+      return;
+    }
+
+    int pin = -1;
+    if (!parsePinToken(argv[1], pin)) {
+      Serial.println(F("Invalid pin. Use D0-D22 or A0-A5."));
+      return;
+    }
+
+    unsigned long windowMs = kDefaultFreqWindowMs;
+    if (argc == 3) {
+      if (!parseUnsignedAuto(argv[2], windowMs) || windowMs < kMinFreqWindowMs ||
+          windowMs > kMaxFreqWindowMs) {
+        Serial.print(F("Invalid window. Use "));
+        Serial.print(kMinFreqWindowMs);
+        Serial.print(F(".."));
+        Serial.print(kMaxFreqWindowMs);
+        Serial.println(F(" ms."));
+        return;
+      }
+    }
+
+    const uint32_t startUs = micros();
+    const uint32_t windowUs = static_cast<uint32_t>(windowMs) * 1000UL;
+    uint32_t risingEdges = 0;
+    int prev = digitalRead(pin);
+
+    while ((uint32_t)(micros() - startUs) < windowUs) {
+      const int curr = digitalRead(pin);
+      if (prev == LOW && curr == HIGH) {
+        ++risingEdges;
+      }
+      prev = curr;
+    }
+
+    const uint32_t elapsedUs = micros() - startUs;
+    uint32_t hzWhole = 0;
+    uint8_t hzFrac2 = 0;
+    if (elapsedUs > 0) {
+      const uint64_t hzX100 =
+          (static_cast<uint64_t>(risingEdges) * 100000000ULL) / elapsedUs;
+      hzWhole = static_cast<uint32_t>(hzX100 / 100ULL);
+      hzFrac2 = static_cast<uint8_t>(hzX100 % 100ULL);
+    }
+
+    Serial.print(F("freq "));
+    printPinLabel(pin);
+    Serial.print(F(" ~= "));
+    Serial.print(hzWhole);
+    Serial.write('.');
+    if (hzFrac2 < 10) {
+      Serial.write('0');
+    }
+    Serial.print(hzFrac2);
+    Serial.print(F(" Hz (edges="));
+    Serial.print(risingEdges);
+    Serial.print(F(", window="));
+    Serial.print(elapsedUs);
+    Serial.println(F(" us)"));
     return;
   }
 
