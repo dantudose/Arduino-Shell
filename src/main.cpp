@@ -65,6 +65,11 @@ void printHexByte(uint8_t value) {
   Serial.write(hex[value & 0x0F]);
 }
 
+void printHexWord(uint16_t value) {
+  printHexByte(static_cast<uint8_t>(value >> 8));
+  printHexByte(static_cast<uint8_t>(value & 0xFF));
+}
+
 void printUptimeFormatted(uint32_t ms) {
   const uint32_t totalSeconds = ms / 1000UL;
   const uint32_t days = totalSeconds / 86400UL;
@@ -184,6 +189,106 @@ bool parseUnsigned(const char *token, unsigned long &value) {
   char *end = nullptr;
   value = strtoul(token, &end, 10);
   return *end == '\0';
+}
+
+bool parseUnsignedAuto(const char *token, unsigned long &value) {
+  if (token == nullptr || *token == '\0' || token[0] == '-') {
+    return false;
+  }
+  char *end = nullptr;
+  value = strtoul(token, &end, 0);
+  return *end == '\0';
+}
+
+bool parseByteValue(const char *token, uint8_t &value) {
+  unsigned long raw = 0;
+  if (!parseUnsignedAuto(token, raw) || raw > 0xFFUL) {
+    return false;
+  }
+  value = static_cast<uint8_t>(raw);
+  return true;
+}
+
+bool parseAddressValue(const char *token, uint16_t &value) {
+  unsigned long raw = 0;
+  if (!parseUnsignedAuto(token, raw) || raw > 0xFFFFUL) {
+    return false;
+  }
+  value = static_cast<uint16_t>(raw);
+  return true;
+}
+
+enum class PortId : uint8_t { B, C, D };
+
+bool parsePortId(const char *token, PortId &port) {
+  if (token == nullptr || *token == '\0') {
+    return false;
+  }
+
+  if (strcmp(token, "b") == 0 || strcmp(token, "portb") == 0 ||
+      strcmp(token, "ddrb") == 0 || strcmp(token, "pinb") == 0) {
+    port = PortId::B;
+    return true;
+  }
+  if (strcmp(token, "c") == 0 || strcmp(token, "portc") == 0 ||
+      strcmp(token, "ddrc") == 0 || strcmp(token, "pinc") == 0) {
+    port = PortId::C;
+    return true;
+  }
+  if (strcmp(token, "d") == 0 || strcmp(token, "portd") == 0 ||
+      strcmp(token, "ddrd") == 0 || strcmp(token, "pind") == 0) {
+    port = PortId::D;
+    return true;
+  }
+  return false;
+}
+
+char portLetter(PortId port) {
+  switch (port) {
+    case PortId::B:
+      return 'B';
+    case PortId::C:
+      return 'C';
+    case PortId::D:
+      return 'D';
+  }
+  return '?';
+}
+
+volatile uint8_t &ddrForPort(PortId port) {
+  switch (port) {
+    case PortId::B:
+      return DDRB;
+    case PortId::C:
+      return DDRC;
+    case PortId::D:
+      return DDRD;
+  }
+  return DDRB;
+}
+
+volatile uint8_t &portForPort(PortId port) {
+  switch (port) {
+    case PortId::B:
+      return PORTB;
+    case PortId::C:
+      return PORTC;
+    case PortId::D:
+      return PORTD;
+  }
+  return PORTB;
+}
+
+volatile uint8_t &pinForPort(PortId port) {
+  switch (port) {
+    case PortId::B:
+      return PINB;
+    case PortId::C:
+      return PINC;
+    case PortId::D:
+      return PIND;
+  }
+  return PINB;
 }
 
 bool parsePinToken(const char *token, int &pin) {
@@ -366,6 +471,12 @@ void printHelp() {
   Serial.println(F("  notone <pin>"));
   Serial.println(F("  pulse <pin> <count> <high_ms> <low_ms>"));
   Serial.println(F("  watch <pin>         - press any key to stop"));
+  Serial.println(F("  ddr <port> [value]  - view/set DDRx"));
+  Serial.println(F("  port <port> [value] - view/set PORTx"));
+  Serial.println(F("  pin <port>          - read PINx"));
+  Serial.println(F("  peek <addr>         - read memory byte"));
+  Serial.println(F("  poke <addr> <val>   - write memory byte"));
+  Serial.println(F("  reg                 - dump AVR core registers"));
   Serial.println();
 }
 
@@ -783,6 +894,203 @@ void handleCommand(char *line) {
         delay(5);
       }
     }
+  }
+
+  if (argc > 0 && strcmp(argv[0], "ddr") == 0) {
+    if (argc != 2 && argc != 3) {
+      Serial.println(F("Usage: ddr <port> [value]"));
+      Serial.println(F("Ports: b|c|d"));
+      return;
+    }
+    PortId portId = PortId::B;
+    if (!parsePortId(argv[1], portId)) {
+      Serial.println(F("Invalid port. Use b|c|d."));
+      return;
+    }
+    volatile uint8_t &reg = ddrForPort(portId);
+    if (argc == 3) {
+      uint8_t value = 0;
+      if (!parseByteValue(argv[2], value)) {
+        Serial.println(F("Invalid value. Use 0..255 (decimal or 0x..)."));
+        return;
+      }
+      reg = value;
+    }
+
+    Serial.print(F("DDR"));
+    Serial.print(portLetter(portId));
+    Serial.print(F(" = 0x"));
+    printHexByte(reg);
+    Serial.print(F(" ("));
+    Serial.print(reg);
+    Serial.println(F(")"));
+    return;
+  }
+
+  if (argc > 0 && strcmp(argv[0], "port") == 0) {
+    if (argc != 2 && argc != 3) {
+      Serial.println(F("Usage: port <port> [value]"));
+      Serial.println(F("Ports: b|c|d"));
+      return;
+    }
+    PortId portId = PortId::B;
+    if (!parsePortId(argv[1], portId)) {
+      Serial.println(F("Invalid port. Use b|c|d."));
+      return;
+    }
+    volatile uint8_t &reg = portForPort(portId);
+    if (argc == 3) {
+      uint8_t value = 0;
+      if (!parseByteValue(argv[2], value)) {
+        Serial.println(F("Invalid value. Use 0..255 (decimal or 0x..)."));
+        return;
+      }
+      reg = value;
+    }
+
+    Serial.print(F("PORT"));
+    Serial.print(portLetter(portId));
+    Serial.print(F(" = 0x"));
+    printHexByte(reg);
+    Serial.print(F(" ("));
+    Serial.print(reg);
+    Serial.println(F(")"));
+    return;
+  }
+
+  if (argc > 0 && strcmp(argv[0], "pin") == 0) {
+    if (argc != 2) {
+      Serial.println(F("Usage: pin <port>"));
+      Serial.println(F("Ports: b|c|d"));
+      return;
+    }
+    PortId portId = PortId::B;
+    if (!parsePortId(argv[1], portId)) {
+      Serial.println(F("Invalid port. Use b|c|d."));
+      return;
+    }
+    volatile uint8_t &reg = pinForPort(portId);
+    Serial.print(F("PIN"));
+    Serial.print(portLetter(portId));
+    Serial.print(F(" = 0x"));
+    printHexByte(reg);
+    Serial.print(F(" ("));
+    Serial.print(reg);
+    Serial.println(F(")"));
+    return;
+  }
+
+  if (argc > 0 && strcmp(argv[0], "peek") == 0) {
+    if (argc != 2) {
+      Serial.println(F("Usage: peek <addr>"));
+      Serial.println(F("Address: 0..65535 or 0x0000..0xFFFF"));
+      return;
+    }
+
+    uint16_t addr = 0;
+    if (!parseAddressValue(argv[1], addr)) {
+      Serial.println(F("Invalid address. Use 0..65535 or 0x...."));
+      return;
+    }
+
+    volatile uint8_t *const ptr = reinterpret_cast<volatile uint8_t *>(addr);
+    const uint8_t value = *ptr;
+
+    Serial.print(F("[0x"));
+    printHexWord(addr);
+    Serial.print(F("] = 0x"));
+    printHexByte(value);
+    Serial.print(F(" ("));
+    Serial.print(value);
+    Serial.println(F(")"));
+    return;
+  }
+
+  if (argc > 0 && strcmp(argv[0], "poke") == 0) {
+    if (argc != 3) {
+      Serial.println(F("Usage: poke <addr> <val>"));
+      Serial.println(F("Addr: 0..65535 or 0x0000..0xFFFF"));
+      Serial.println(F("Val: 0..255 or 0x00..0xFF"));
+      return;
+    }
+
+    uint16_t addr = 0;
+    if (!parseAddressValue(argv[1], addr)) {
+      Serial.println(F("Invalid address. Use 0..65535 or 0x...."));
+      return;
+    }
+
+    uint8_t value = 0;
+    if (!parseByteValue(argv[2], value)) {
+      Serial.println(F("Invalid value. Use 0..255 or 0x.."));
+      return;
+    }
+
+    volatile uint8_t *const ptr = reinterpret_cast<volatile uint8_t *>(addr);
+    *ptr = value;
+    const uint8_t readBack = *ptr;
+
+    Serial.print(F("[0x"));
+    printHexWord(addr);
+    Serial.print(F("] <= 0x"));
+    printHexByte(value);
+    Serial.print(F(" (readback 0x"));
+    printHexByte(readBack);
+    Serial.println(F(")"));
+    return;
+  }
+
+  if (argc > 0 && strcmp(argv[0], "reg") == 0) {
+    if (argc != 1) {
+      Serial.println(F("Usage: reg"));
+      return;
+    }
+
+    Serial.println(F("\n=== AVR Registers ==="));
+    Serial.print(F("SP   : 0x"));
+    printHexWord(SP);
+    Serial.println();
+
+    Serial.print(F("SPL  : 0x"));
+    printHexByte(SPL);
+    Serial.print(F("  SPH: 0x"));
+    printHexByte(SPH);
+    Serial.println();
+
+    Serial.print(F("SREG : 0x"));
+    printHexByte(SREG);
+    Serial.print(F("  MCUSR(now): 0x"));
+    printHexByte(MCUSR);
+    Serial.print(F("  MCUSR(boot): 0x"));
+    printHexByte(gResetFlags);
+    Serial.println();
+
+    Serial.print(F("DDRB : 0x"));
+    printHexByte(DDRB);
+    Serial.print(F("  PORTB: 0x"));
+    printHexByte(PORTB);
+    Serial.print(F("  PINB: 0x"));
+    printHexByte(PINB);
+    Serial.println();
+
+    Serial.print(F("DDRC : 0x"));
+    printHexByte(DDRC);
+    Serial.print(F("  PORTC: 0x"));
+    printHexByte(PORTC);
+    Serial.print(F("  PINC: 0x"));
+    printHexByte(PINC);
+    Serial.println();
+
+    Serial.print(F("DDRD : 0x"));
+    printHexByte(DDRD);
+    Serial.print(F("  PORTD: 0x"));
+    printHexByte(PORTD);
+    Serial.print(F("  PIND: 0x"));
+    printHexByte(PIND);
+    Serial.println();
+
+    Serial.println(F("=====================\n"));
+    return;
   }
 
   Serial.print(F("Unknown command: "));
