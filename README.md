@@ -1,4 +1,4 @@
-# ATmega328P Xplained Mini Command Shell
+# Arduino Command Shell
 
 Serial command shell firmware for the **ATmega328P Xplained Mini** (Arduino/MiniCore on PlatformIO).
 
