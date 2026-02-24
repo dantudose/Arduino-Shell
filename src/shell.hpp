@@ -185,6 +185,13 @@ void historyDown();
 
 void printHelp();
 void printStatus();
+#if FEATURE_FS
+void handleFsCommand(const char *rawLine);
+#endif
+bool handleI2cCommand(char *argv[], size_t argc);
+bool handleEepromCommand(char *argv[], size_t argc);
+bool handleGpioCommand(char *argv[], size_t argc);
+bool handleLowLevelCommand(char *argv[], size_t argc);
 void handleCommand(char *line);
 void updateSerial();
 
