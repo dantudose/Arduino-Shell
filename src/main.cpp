@@ -1,5 +1,6 @@
 
 #include <Arduino.h>
+#include <Wire.h>
 #include <avr/boot.h>
 #include <avr/wdt.h>
 #include <ctype.h>
@@ -18,11 +19,15 @@ namespace {
 #endif
 constexpr uint32_t kBaudRate = DEMO_BAUD;
 constexpr size_t kCmdBufferSize = 64;
+constexpr size_t kMaxArgs = 32;
 constexpr size_t kHistorySize = 8;
 constexpr uint16_t kWatchPeriodMs = 200;
 constexpr uint16_t kDefaultFreqWindowMs = 250;
 constexpr uint16_t kMinFreqWindowMs = 10;
 constexpr uint16_t kMaxFreqWindowMs = 10000;
+constexpr uint8_t kI2cMaxTransferLen = 32; // Wire buffer limit on AVR
+constexpr uint32_t kI2cSpeed100kHz = 100000UL;
+constexpr uint32_t kI2cSpeed400kHz = 400000UL;
 constexpr uint8_t kUserAnalogCount = 6; // A0..A5 for this shell
 constexpr char kPrompt[] = "arduino$ ";
 constexpr char kBoardName[] = "ATmega328P Xplained Mini";
@@ -32,6 +37,7 @@ constexpr char kBoardName[] = "ATmega328P Xplained Mini";
 
 enum class EscState : uint8_t { None, SeenEsc, SeenEscBracket };
 uint8_t gResetFlags = 0;
+uint32_t gI2cClockHz = kI2cSpeed100kHz;
 
 char gCmdBuffer[kCmdBufferSize];
 size_t gCmdLen = 0;
@@ -219,6 +225,86 @@ bool parseAddressValue(const char *token, uint16_t &value) {
   }
   value = static_cast<uint16_t>(raw);
   return true;
+}
+
+bool parseI2cAddress(const char *token, uint8_t &address) {
+  uint8_t raw = 0;
+  if (!parseByteValue(token, raw) || raw > 0x7FU) {
+    return false;
+  }
+  address = raw;
+  return true;
+}
+
+bool parseI2cSpeedToken(const char *token, uint32_t &hz) {
+  if (token == nullptr || *token == '\0') {
+    return false;
+  }
+
+  if (strcmp(token, "100k") == 0 || strcmp(token, "100") == 0 ||
+      strcmp(token, "100000") == 0) {
+    hz = kI2cSpeed100kHz;
+    return true;
+  }
+  if (strcmp(token, "400k") == 0 || strcmp(token, "400") == 0 ||
+      strcmp(token, "400000") == 0) {
+    hz = kI2cSpeed400kHz;
+    return true;
+  }
+  return false;
+}
+
+bool parseI2cLen(const char *token, uint8_t &length) {
+  unsigned long raw = 0;
+  if (!parseUnsignedAuto(token, raw) || raw == 0 || raw > kI2cMaxTransferLen) {
+    return false;
+  }
+  length = static_cast<uint8_t>(raw);
+  return true;
+}
+
+void setI2cClock(uint32_t hz) {
+#if defined(TWBR) && defined(TWPS0) && defined(TWPS1) && defined(F_CPU)
+  // Force prescaler=1 and compute TWBR from AVR datasheet formula.
+  TWSR = static_cast<uint8_t>(TWSR & ~(_BV(TWPS0) | _BV(TWPS1)));
+  const uint32_t twbrValue = ((F_CPU / hz) - 16UL) / 2UL;
+  TWBR = static_cast<uint8_t>(twbrValue);
+#else
+  Wire.setClock(hz);
+#endif
+  gI2cClockHz = hz;
+}
+
+void printI2cAddress(uint8_t address) {
+  Serial.print(F("0x"));
+  printHexByte(address);
+}
+
+void printI2cTxStatus(uint8_t status) {
+  Serial.print(F("I2C error "));
+  Serial.print(status);
+  Serial.print(F(" ("));
+  switch (status) {
+    case 1:
+      Serial.print(F("data too long"));
+      break;
+    case 2:
+      Serial.print(F("NACK on address"));
+      break;
+    case 3:
+      Serial.print(F("NACK on data"));
+      break;
+    case 4:
+      Serial.print(F("other bus error"));
+      break;
+    case 5:
+      Serial.print(F("timeout"));
+      break;
+    default:
+      Serial.print(F("unknown"));
+      break;
+  }
+  Serial.println(F(")"));
 }
 
 enum class PortId : uint8_t { B, C, D };
@@ -468,6 +554,12 @@ void printHelp() {
   Serial.println(F("  micros              - current micros()"));
   Serial.println(F("  delay <ms>          - blocking delay"));
   Serial.println(F("  freq <pin> [ms]     - estimate input frequency"));
+  Serial.println(F("  i2cscan             - scan I2C bus"));
+  Serial.println(F("  i2cspeed <100k|400k>"));
+  Serial.println(F("  i2cread <addr> <n>"));
+  Serial.println(F("  i2cwrite <addr> <bytes...>"));
+  Serial.println(F("  i2cwr <addr> <reg> <bytes...>"));
+  Serial.println(F("  i2crr <addr> <reg> <n>"));
   Serial.println(F("  pinmode <pin> <in|out|pullup>"));
   Serial.println(F("  digitalread <pin>"));
   Serial.println(F("  digitalwrite <pin> <0|1>"));
@@ -642,8 +734,263 @@ void handleCommand(char *line) {
   char cmdArgs[kCmdBufferSize];
   strncpy(cmdArgs, cmd, kCmdBufferSize - 1);
   cmdArgs[kCmdBufferSize - 1] = '\0';
-  char *argv[8] = {};
-  const size_t argc = splitArgs(cmdArgs, argv, 8);
+  char *argv[kMaxArgs] = {};
+  const size_t argc = splitArgs(cmdArgs, argv, kMaxArgs);
+
+  if (argc > 0 && strcmp(argv[0], "i2cspeed") == 0) {
+    if (argc != 2) {
+      Serial.println(F("Usage: i2cspeed <100k|400k>"));
+      return;
+    }
+
+    uint32_t hz = 0;
+    if (!parseI2cSpeedToken(argv[1], hz)) {
+      Serial.println(F("Invalid speed. Use 100k or 400k."));
+      return;
+    }
+
+    setI2cClock(hz);
+    Serial.print(F("I2C speed set to "));
+    Serial.print(gI2cClockHz / 1000UL);
+    Serial.println(F(" kHz"));
+    return;
+  }
+
+  if (argc > 0 && strcmp(argv[0], "i2cscan") == 0) {
+    if (argc != 1) {
+      Serial.println(F("Usage: i2cscan"));
+      return;
+    }
+
+    uint8_t found = 0;
+    Serial.println(F("Scanning I2C addresses 0x01..0x7F..."));
+    for (uint8_t address = 1; address <= 0x7F; ++address) {
+      Wire.beginTransmission(address);
+      const uint8_t status = Wire.endTransmission();
+      if (status == 0) {
+        Serial.print(F("  found @ "));
+        printI2cAddress(address);
+        Serial.println();
+        ++found;
+      } else if (status == 4) {
+        Serial.print(F("  bus error @ "));
+        printI2cAddress(address);
+        Serial.println();
+      }
+    }
+
+    if (found == 0) {
+      Serial.println(F("No I2C devices found."));
+    } else {
+      Serial.print(F("I2C devices found: "));
+      Serial.println(found);
+    }
+    return;
+  }
+
+  if (argc > 0 && strcmp(argv[0], "i2cread") == 0) {
+    if (argc != 3) {
+      Serial.println(F("Usage: i2cread <addr> <n>"));
+      Serial.print(F("n range: 1.."));
+      Serial.println(kI2cMaxTransferLen);
+      return;
+    }
+
+    uint8_t address = 0;
+    uint8_t length = 0;
+    if (!parseI2cAddress(argv[1], address)) {
+      Serial.println(F("Invalid address. Use 0x00..0x7F."));
+      return;
+    }
+    if (!parseI2cLen(argv[2], length)) {
+      Serial.print(F("Invalid length. Use 1.."));
+      Serial.println(kI2cMaxTransferLen);
+      return;
+    }
+
+    const uint8_t received =
+        Wire.requestFrom(static_cast<int>(address), static_cast<int>(length));
+    Serial.print(F("i2cread "));
+    printI2cAddress(address);
+    Serial.print(F(" -> "));
+    Serial.print(received);
+    Serial.print(F(" byte(s):"));
+
+    for (uint8_t i = 0; i < received && Wire.available() > 0; ++i) {
+      const uint8_t value = static_cast<uint8_t>(Wire.read());
+      Serial.write(' ');
+      Serial.print(F("0x"));
+      printHexByte(value);
+    }
+    Serial.println();
+
+    if (received != length) {
+      Serial.print(F("Short read (requested "));
+      Serial.print(length);
+      Serial.println(F(")."));
+    }
+    return;
+  }
+
+  if (argc > 0 && strcmp(argv[0], "i2cwrite") == 0) {
+    if (argc < 3) {
+      Serial.println(F("Usage: i2cwrite <addr> <bytes...>"));
+      return;
+    }
+
+    uint8_t address = 0;
+    if (!parseI2cAddress(argv[1], address)) {
+      Serial.println(F("Invalid address. Use 0x00..0x7F."));
+      return;
+    }
+
+    const size_t dataLen = argc - 2;
+    if (dataLen == 0 || dataLen > kI2cMaxTransferLen) {
+      Serial.print(F("Data length must be 1.."));
+      Serial.println(kI2cMaxTransferLen);
+      return;
+    }
+
+    uint8_t data[kI2cMaxTransferLen] = {};
+    for (size_t i = 0; i < dataLen; ++i) {
+      if (!parseByteValue(argv[2 + i], data[i])) {
+        Serial.print(F("Invalid data byte: "));
+        Serial.println(argv[2 + i]);
+        return;
+      }
+    }
+
+    Wire.beginTransmission(address);
+    for (size_t i = 0; i < dataLen; ++i) {
+      Wire.write(data[i]);
+    }
+    const uint8_t status = Wire.endTransmission();
+    if (status != 0) {
+      printI2cTxStatus(status);
+      return;
+    }
+
+    Serial.print(F("Wrote "));
+    Serial.print(dataLen);
+    Serial.print(F(" byte(s) to "));
+    printI2cAddress(address);
+    Serial.println();
+    return;
+  }
+
+  if (argc > 0 && strcmp(argv[0], "i2cwr") == 0) {
+    if (argc < 4) {
+      Serial.println(F("Usage: i2cwr <addr> <reg> <bytes...>"));
+      return;
+    }
+
+    uint8_t address = 0;
+    uint8_t reg = 0;
+    if (!parseI2cAddress(argv[1], address)) {
+      Serial.println(F("Invalid address. Use 0x00..0x7F."));
+      return;
+    }
+    if (!parseByteValue(argv[2], reg)) {
+      Serial.println(F("Invalid register. Use 0..255 or 0x00..0xFF."));
+      return;
+    }
+
+    const size_t dataLen = argc - 3;
+    if (dataLen == 0 || (1 + dataLen) > kI2cMaxTransferLen) {
+      Serial.print(F("Payload too long. reg + data must be <= "));
+      Serial.print(kI2cMaxTransferLen);
+      Serial.println(F(" bytes."));
+      return;
+    }
+
+    uint8_t data[kI2cMaxTransferLen - 1] = {};
+    for (size_t i = 0; i < dataLen; ++i) {
+      if (!parseByteValue(argv[3 + i], data[i])) {
+        Serial.print(F("Invalid data byte: "));
+        Serial.println(argv[3 + i]);
+        return;
+      }
+    }
+
+    Wire.beginTransmission(address);
+    Wire.write(reg);
+    for (size_t i = 0; i < dataLen; ++i) {
+      Wire.write(data[i]);
+    }
+    const uint8_t status = Wire.endTransmission();
+    if (status != 0) {
+      printI2cTxStatus(status);
+      return;
+    }
+
+    Serial.print(F("Wrote reg 0x"));
+    printHexByte(reg);
+    Serial.print(F(" + "));
+    Serial.print(dataLen);
+    Serial.print(F(" byte(s) to "));
+    printI2cAddress(address);
+    Serial.println();
+    return;
+  }
+
+  if (argc > 0 && strcmp(argv[0], "i2crr") == 0) {
+    if (argc != 4) {
+      Serial.println(F("Usage: i2crr <addr> <reg> <n>"));
+      Serial.print(F("n range: 1.."));
+      Serial.println(kI2cMaxTransferLen);
+      return;
+    }
+
+    uint8_t address = 0;
+    uint8_t reg = 0;
+    uint8_t length = 0;
+    if (!parseI2cAddress(argv[1], address)) {
+      Serial.println(F("Invalid address. Use 0x00..0x7F."));
+      return;
+    }
+    if (!parseByteValue(argv[2], reg)) {
+      Serial.println(F("Invalid register. Use 0..255 or 0x00..0xFF."));
+      return;
+    }
+    if (!parseI2cLen(argv[3], length)) {
+      Serial.print(F("Invalid length. Use 1.."));
+      Serial.println(kI2cMaxTransferLen);
+      return;
+    }
+
+    Wire.beginTransmission(address);
+    Wire.write(reg);
+    const uint8_t txStatus = Wire.endTransmission(false);
+    if (txStatus != 0) {
+      printI2cTxStatus(txStatus);
+      return;
+    }
+
+    const uint8_t received =
+        Wire.requestFrom(static_cast<int>(address), static_cast<int>(length));
+    Serial.print(F("i2crr "));
+    printI2cAddress(address);
+    Serial.print(F(" reg 0x"));
+    printHexByte(reg);
+    Serial.print(F(" -> "));
+    Serial.print(received);
+    Serial.print(F(" byte(s):"));
+
+    for (uint8_t i = 0; i < received && Wire.available() > 0; ++i) {
+      const uint8_t value = static_cast<uint8_t>(Wire.read());
+      Serial.write(' ');
+      Serial.print(F("0x"));
+      printHexByte(value);
+    }
+    Serial.println();
+
+    if (received != length) {
+      Serial.print(F("Short read (requested "));
+      Serial.print(length);
+      Serial.println(F(")."));
+    }
+    return;
+  }
 
   if (argc > 0 && strcmp(argv[0], "pinmode") == 0) {
     if (argc != 3) {
@@ -1257,6 +1604,8 @@ void setup() {
   captureResetFlags();
 
   Serial.begin(kBaudRate);
+  Wire.begin();
+  setI2cClock(gI2cClockHz);
   delay(200);
 
   Serial.println(F("\nATmega328P Xplained Mini command shell"));
