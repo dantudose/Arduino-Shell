@@ -31,6 +31,19 @@ constexpr uint32_t kI2cSpeed100kHz = 100000UL;
 constexpr uint32_t kI2cSpeed400kHz = 400000UL;
 constexpr uint8_t kEepromEraseValue = 0xFF;
 constexpr char kEepromEraseToken[] = "confirm";
+constexpr uint8_t kFsMagic0 = 'E';
+constexpr uint8_t kFsMagic1 = 'F';
+constexpr uint8_t kFsMagic2 = 'S';
+constexpr uint8_t kFsMagic3 = '1';
+constexpr uint8_t kFsVersion = 1;
+constexpr uint8_t kFsRootParent = 0xFF;
+constexpr uint8_t kFsMaxEntries = 16;
+constexpr uint8_t kFsNameBytes = 12; // includes trailing NUL
+constexpr uint8_t kFsEntrySize = 20;
+constexpr uint16_t kFsHeaderSize = 16;
+constexpr uint16_t kFsEntryTableOffset = kFsHeaderSize;
+constexpr uint16_t kFsDataStart =
+    kFsEntryTableOffset + (static_cast<uint16_t>(kFsMaxEntries) * kFsEntrySize);
 constexpr uint8_t kUserAnalogCount = 6; // A0..A5 for this shell
 constexpr char kPrompt[] = "arduino$ ";
 constexpr char kBoardName[] = "ATmega328P Xplained Mini";
@@ -51,6 +64,15 @@ int gHistoryCursor = -1;
 char gEditBackup[kCmdBufferSize];
 size_t gEditBackupLen = 0;
 EscState gEscState = EscState::None;
+
+struct FsEntry {
+  bool used = false;
+  bool isDir = false;
+  uint8_t parent = kFsRootParent;
+  char name[kFsNameBytes] = {0};
+  uint16_t dataStart = 0;
+  uint16_t dataLen = 0;
+};
 
 void printPrompt() { Serial.print(kPrompt); }
 
@@ -172,6 +194,22 @@ bool startsWithIgnoreCase(const char *text, const char *prefix) {
   return true;
 }
 
+bool equalsIgnoreCase(const char *a, const char *b) {
+  if (a == nullptr || b == nullptr) {
+    return false;
+  }
+  while (*a != '\0' && *b != '\0') {
+    const char ac = static_cast<char>(tolower(static_cast<unsigned char>(*a)));
+    const char bc = static_cast<char>(tolower(static_cast<unsigned char>(*b)));
+    if (ac != bc) {
+      return false;
+    }
+    ++a;
+    ++b;
+  }
+  return *a == '\0' && *b == '\0';
+}
+
 size_t splitArgs(char *text, char *argv[], size_t maxArgs) {
   size_t argc = 0;
   char *p = text;
@@ -289,6 +327,327 @@ bool parseEepromLen(const char *token, size_t &length) {
     return false;
   }
   length = static_cast<size_t>(raw);
+  return true;
+}
+
+uint16_t eepromReadU16(size_t addr) {
+  const uint16_t lo = EEPROM.read(static_cast<int>(addr));
+  const uint16_t hi = EEPROM.read(static_cast<int>(addr + 1U));
+  return static_cast<uint16_t>(lo | (hi << 8));
+}
+
+void eepromWriteU16(size_t addr, uint16_t value) {
+  EEPROM.update(static_cast<int>(addr), static_cast<uint8_t>(value & 0xFFU));
+  EEPROM.update(static_cast<int>(addr + 1U), static_cast<uint8_t>((value >> 8) & 0xFFU));
+}
+
+size_t fsEntryAddress(uint8_t index) {
+  return static_cast<size_t>(kFsEntryTableOffset) +
+         (static_cast<size_t>(index) * static_cast<size_t>(kFsEntrySize));
+}
+
+bool fsIsValidNameToken(const char *name) {
+  if (name == nullptr || *name == '\0') {
+    return false;
+  }
+  if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) {
+    return false;
+  }
+
+  const size_t len = strlen(name);
+  if (len == 0 || len >= kFsNameBytes) {
+    return false;
+  }
+
+  for (size_t i = 0; i < len; ++i) {
+    const unsigned char c = static_cast<unsigned char>(name[i]);
+    if (c < 32 || c == '/') {
+      return false;
+    }
+  }
+  return true;
+}
+
+void fsSetRootEntry(FsEntry &entry) {
+  entry.used = true;
+  entry.isDir = true;
+  entry.parent = kFsRootParent;
+  strncpy(entry.name, "/", kFsNameBytes - 1);
+  entry.name[kFsNameBytes - 1] = '\0';
+  entry.dataStart = 0;
+  entry.dataLen = 0;
+}
+
+void fsLoadEntry(uint8_t index, FsEntry &entry) {
+  const size_t base = fsEntryAddress(index);
+  const uint8_t flags = EEPROM.read(static_cast<int>(base));
+  entry.used = (flags & 0x01U) != 0U;
+  entry.isDir = (flags & 0x02U) != 0U;
+  entry.parent = EEPROM.read(static_cast<int>(base + 1U));
+
+  for (size_t i = 0; i < kFsNameBytes; ++i) {
+    entry.name[i] = static_cast<char>(EEPROM.read(static_cast<int>(base + 2U + i)));
+  }
+  entry.name[kFsNameBytes - 1] = '\0';
+
+  entry.dataStart = eepromReadU16(base + 14U);
+  entry.dataLen = eepromReadU16(base + 16U);
+}
+
+void fsStoreEntry(uint8_t index, const FsEntry &entry) {
+  const size_t base = fsEntryAddress(index);
+  uint8_t flags = 0;
+  if (entry.used) {
+    flags |= 0x01U;
+  }
+  if (entry.isDir) {
+    flags |= 0x02U;
+  }
+
+  EEPROM.update(static_cast<int>(base), flags);
+  EEPROM.update(static_cast<int>(base + 1U), entry.parent);
+
+  size_t nameLen = strlen(entry.name);
+  if (nameLen > (kFsNameBytes - 1U)) {
+    nameLen = kFsNameBytes - 1U;
+  }
+  for (size_t i = 0; i < kFsNameBytes; ++i) {
+    const char c = (i < nameLen) ? entry.name[i] : '\0';
+    EEPROM.update(static_cast<int>(base + 2U + i), static_cast<uint8_t>(c));
+  }
+
+  eepromWriteU16(base + 14U, entry.dataStart);
+  eepromWriteU16(base + 16U, entry.dataLen);
+  EEPROM.update(static_cast<int>(base + 18U), 0);
+  EEPROM.update(static_cast<int>(base + 19U), 0);
+}
+
+void fsClearEntry(uint8_t index) {
+  const size_t base = fsEntryAddress(index);
+  for (size_t i = 0; i < kFsEntrySize; ++i) {
+    EEPROM.update(static_cast<int>(base + i), 0);
+  }
+}
+
+uint16_t fsNextFree() { return eepromReadU16(8U); }
+
+void fsSetNextFree(uint16_t nextFree) { eepromWriteU16(8U, nextFree); }
+
+bool fsIsFormatted() {
+  const size_t size = eepromSize();
+  if (size <= kFsDataStart) {
+    return false;
+  }
+
+  if (EEPROM.read(0) != kFsMagic0 || EEPROM.read(1) != kFsMagic1 ||
+      EEPROM.read(2) != kFsMagic2 || EEPROM.read(3) != kFsMagic3) {
+    return false;
+  }
+  if (EEPROM.read(4) != kFsVersion) {
+    return false;
+  }
+  if (EEPROM.read(5) != kFsMaxEntries) {
+    return false;
+  }
+  if (eepromReadU16(6U) != kFsDataStart) {
+    return false;
+  }
+
+  const uint16_t nextFree = fsNextFree();
+  return nextFree >= kFsDataStart && nextFree <= size;
+}
+
+void fsFormat() {
+  EEPROM.update(0, kFsMagic0);
+  EEPROM.update(1, kFsMagic1);
+  EEPROM.update(2, kFsMagic2);
+  EEPROM.update(3, kFsMagic3);
+  EEPROM.update(4, kFsVersion);
+  EEPROM.update(5, kFsMaxEntries);
+  eepromWriteU16(6U, kFsDataStart);
+  fsSetNextFree(kFsDataStart);
+  for (size_t i = 10; i < kFsHeaderSize; ++i) {
+    EEPROM.update(static_cast<int>(i), 0);
+  }
+
+  for (uint8_t i = 0; i < kFsMaxEntries; ++i) {
+    fsClearEntry(i);
+  }
+}
+
+void fsEnsureInitialized() {
+  if (!fsIsFormatted()) {
+    fsFormat();
+  }
+}
+
+bool fsFindChild(uint8_t parent, const char *name, uint8_t &indexOut, FsEntry &entryOut) {
+  for (uint8_t i = 0; i < kFsMaxEntries; ++i) {
+    FsEntry entry;
+    fsLoadEntry(i, entry);
+    if (entry.used && entry.parent == parent && strcmp(entry.name, name) == 0) {
+      indexOut = i;
+      entryOut = entry;
+      return true;
+    }
+  }
+  return false;
+}
+
+bool fsFindFreeEntry(uint8_t &indexOut) {
+  for (uint8_t i = 0; i < kFsMaxEntries; ++i) {
+    FsEntry entry;
+    fsLoadEntry(i, entry);
+    if (!entry.used) {
+      indexOut = i;
+      return true;
+    }
+  }
+  return false;
+}
+
+bool fsHasChildren(uint8_t parentIndex) {
+  for (uint8_t i = 0; i < kFsMaxEntries; ++i) {
+    FsEntry entry;
+    fsLoadEntry(i, entry);
+    if (entry.used && entry.parent == parentIndex) {
+      return true;
+    }
+  }
+  return false;
+}
+
+bool fsResolvePath(const char *path, uint8_t &indexOut, FsEntry &entryOut) {
+  if (path == nullptr) {
+    return false;
+  }
+
+  char work[kCmdBufferSize];
+  strncpy(work, path, kCmdBufferSize - 1);
+  work[kCmdBufferSize - 1] = '\0';
+
+  char *start = work;
+  while (*start != '\0' && isspace(static_cast<unsigned char>(*start))) {
+    ++start;
+  }
+
+  size_t len = strlen(start);
+  while (len > 0 && isspace(static_cast<unsigned char>(start[len - 1]))) {
+    start[len - 1] = '\0';
+    --len;
+  }
+
+  while (len > 1 && start[len - 1] == '/') {
+    start[len - 1] = '\0';
+    --len;
+  }
+
+  if (len == 0 || (len == 1 && start[0] == '/')) {
+    indexOut = kFsRootParent;
+    fsSetRootEntry(entryOut);
+    return true;
+  }
+
+  while (*start == '/') {
+    ++start;
+  }
+  if (*start == '\0') {
+    indexOut = kFsRootParent;
+    fsSetRootEntry(entryOut);
+    return true;
+  }
+
+  uint8_t currentParent = kFsRootParent;
+  uint8_t currentIndex = kFsRootParent;
+  FsEntry currentEntry;
+
+  char *saveptr = nullptr;
+  char *token = strtok_r(start, "/", &saveptr);
+  while (token != nullptr) {
+    if (!fsIsValidNameToken(token)) {
+      return false;
+    }
+    if (!fsFindChild(currentParent, token, currentIndex, currentEntry)) {
+      return false;
+    }
+
+    token = strtok_r(nullptr, "/", &saveptr);
+    if (token != nullptr && !currentEntry.isDir) {
+      return false;
+    }
+    currentParent = currentIndex;
+  }
+
+  indexOut = currentIndex;
+  entryOut = currentEntry;
+  return true;
+}
+
+bool fsResolveDirectory(const char *path, uint8_t &indexOut, FsEntry &entryOut) {
+  if (!fsResolvePath(path, indexOut, entryOut)) {
+    return false;
+  }
+  return entryOut.isDir;
+}
+
+bool fsSplitParentLeaf(const char *path, char *parentOut, size_t parentOutSize, char *leafOut,
+                       size_t leafOutSize) {
+  if (path == nullptr || parentOut == nullptr || leafOut == nullptr || parentOutSize == 0 ||
+      leafOutSize == 0) {
+    return false;
+  }
+
+  char work[kCmdBufferSize];
+  strncpy(work, path, kCmdBufferSize - 1);
+  work[kCmdBufferSize - 1] = '\0';
+
+  char *start = work;
+  while (*start != '\0' && isspace(static_cast<unsigned char>(*start))) {
+    ++start;
+  }
+
+  size_t len = strlen(start);
+  while (len > 0 && isspace(static_cast<unsigned char>(start[len - 1]))) {
+    start[len - 1] = '\0';
+    --len;
+  }
+
+  while (len > 1 && start[len - 1] == '/') {
+    start[len - 1] = '\0';
+    --len;
+  }
+
+  if (len == 0 || (len == 1 && start[0] == '/')) {
+    return false;
+  }
+
+  char *lastSlash = strrchr(start, '/');
+  const char *leaf = nullptr;
+  const char *parent = nullptr;
+
+  if (lastSlash == nullptr) {
+    parent = "/";
+    leaf = start;
+  } else {
+    *lastSlash = '\0';
+    leaf = lastSlash + 1;
+    parent = (start[0] == '\0') ? "/" : start;
+  }
+
+  if (!fsIsValidNameToken(leaf)) {
+    return false;
+  }
+
+  const size_t leafLen = strlen(leaf);
+  const size_t parentLen = strlen(parent);
+  if (leafLen >= leafOutSize || parentLen >= parentOutSize) {
+    return false;
+  }
+
+  strncpy(leafOut, leaf, leafOutSize - 1);
+  leafOut[leafOutSize - 1] = '\0';
+  strncpy(parentOut, parent, parentOutSize - 1);
+  parentOut[parentOutSize - 1] = '\0';
   return true;
 }
 
@@ -592,6 +951,8 @@ void printHelp() {
   Serial.println(F("  eepread <addr> [len]"));
   Serial.println(F("  eepwrite <addr> <bytes...>"));
   Serial.println(F("  eeperase confirm    - clear EEPROM"));
+  Serial.println(F("  fs ...              - EEPROM mini filesystem"));
+  Serial.println(F("    fs help           - filesystem commands"));
   Serial.println(F("  pinmode <pin> <in|out|pullup>"));
   Serial.println(F("  digitalread <pin>"));
   Serial.println(F("  digitalwrite <pin> <0|1>"));
@@ -650,6 +1011,410 @@ void normalize(char *s) {
   s[w] = '\0';
 }
 
+void printFsHelp() {
+  Serial.println(F("\nFS commands:"));
+  Serial.println(F("  fs help"));
+  Serial.println(F("  fs format confirm"));
+  Serial.println(F("  fs ls [path]"));
+  Serial.println(F("  fs cat <path>"));
+  Serial.println(F("  fs mkdir <path>"));
+  Serial.println(F("  fs touch <path>"));
+  Serial.println(F("  fs write <path> <text>"));
+  Serial.println(F("  fs rm <path>"));
+  Serial.println(F("  fs stat"));
+  Serial.println();
+}
+
+void handleFsCommand(const char *rawLine) {
+  if (rawLine == nullptr) {
+    return;
+  }
+
+  char argsLine[kCmdBufferSize];
+  strncpy(argsLine, rawLine, kCmdBufferSize - 1);
+  argsLine[kCmdBufferSize - 1] = '\0';
+
+  char *argv[kMaxArgs] = {};
+  const size_t argc = splitArgs(argsLine, argv, kMaxArgs);
+  if (argc == 0 || !equalsIgnoreCase(argv[0], "fs")) {
+    return;
+  }
+
+  if (argc == 1 || equalsIgnoreCase(argv[1], "help")) {
+    printFsHelp();
+    return;
+  }
+
+  if (equalsIgnoreCase(argv[1], "format")) {
+    if (argc != 3 || !equalsIgnoreCase(argv[2], kEepromEraseToken)) {
+      Serial.print(F("Usage: fs format "));
+      Serial.println(kEepromEraseToken);
+      return;
+    }
+    fsFormat();
+    Serial.print(F("FS formatted. Capacity: "));
+    Serial.print(eepromSize() - kFsDataStart);
+    Serial.println(F(" bytes data."));
+    return;
+  }
+
+  if (!fsIsFormatted()) {
+    Serial.print(F("FS not initialized. Run: fs format "));
+    Serial.println(kEepromEraseToken);
+    return;
+  }
+
+  if (equalsIgnoreCase(argv[1], "ls")) {
+    if (argc != 2 && argc != 3) {
+      Serial.println(F("Usage: fs ls [path]"));
+      return;
+    }
+    const char *path = (argc == 3) ? argv[2] : "/";
+    uint8_t dirIndex = kFsRootParent;
+    FsEntry dirEntry;
+    if (!fsResolveDirectory(path, dirIndex, dirEntry)) {
+      Serial.println(F("Path is not a directory or does not exist."));
+      return;
+    }
+
+    Serial.print(F("Listing "));
+    Serial.println(path);
+
+    uint8_t shown = 0;
+    for (uint8_t i = 0; i < kFsMaxEntries; ++i) {
+      FsEntry entry;
+      fsLoadEntry(i, entry);
+      if (!entry.used || entry.parent != dirIndex) {
+        continue;
+      }
+      ++shown;
+      Serial.print(entry.isDir ? F("d ") : F("f "));
+      Serial.print(entry.name);
+      if (!entry.isDir) {
+        Serial.print(F(" ("));
+        Serial.print(entry.dataLen);
+        Serial.print(F("B)"));
+      }
+      Serial.println();
+    }
+    if (shown == 0) {
+      Serial.println(F("(empty)"));
+    }
+    return;
+  }
+
+  if (equalsIgnoreCase(argv[1], "cat")) {
+    if (argc != 3) {
+      Serial.println(F("Usage: fs cat <path>"));
+      return;
+    }
+    uint8_t nodeIndex = kFsRootParent;
+    FsEntry entry;
+    if (!fsResolvePath(argv[2], nodeIndex, entry) || entry.isDir) {
+      Serial.println(F("File not found."));
+      return;
+    }
+
+    if (entry.dataLen == 0) {
+      Serial.println(F("(empty file)"));
+      return;
+    }
+
+    for (uint16_t i = 0; i < entry.dataLen; ++i) {
+      const uint8_t value = EEPROM.read(static_cast<int>(entry.dataStart + i));
+      if (value == '\n' || value == '\r' || value == '\t' || isprint(value)) {
+        Serial.write(value);
+      } else {
+        Serial.print(F("\\x"));
+        printHexByte(value);
+      }
+    }
+    Serial.println();
+    return;
+  }
+
+  if (equalsIgnoreCase(argv[1], "mkdir")) {
+    if (argc != 3) {
+      Serial.println(F("Usage: fs mkdir <path>"));
+      return;
+    }
+
+    char parentPath[kCmdBufferSize];
+    char leaf[kFsNameBytes];
+    if (!fsSplitParentLeaf(argv[2], parentPath, sizeof(parentPath), leaf, sizeof(leaf))) {
+      Serial.println(F("Invalid path."));
+      return;
+    }
+
+    uint8_t parentIndex = kFsRootParent;
+    FsEntry parentEntry;
+    if (!fsResolveDirectory(parentPath, parentIndex, parentEntry)) {
+      Serial.println(F("Parent directory does not exist."));
+      return;
+    }
+
+    uint8_t existingIndex = 0;
+    FsEntry existingEntry;
+    if (fsFindChild(parentIndex, leaf, existingIndex, existingEntry)) {
+      Serial.println(F("Path already exists."));
+      return;
+    }
+
+    uint8_t newIndex = 0;
+    if (!fsFindFreeEntry(newIndex)) {
+      Serial.println(F("FS entry table full."));
+      return;
+    }
+
+    FsEntry newEntry;
+    newEntry.used = true;
+    newEntry.isDir = true;
+    newEntry.parent = parentIndex;
+    strncpy(newEntry.name, leaf, kFsNameBytes - 1);
+    newEntry.name[kFsNameBytes - 1] = '\0';
+    fsStoreEntry(newIndex, newEntry);
+
+    Serial.print(F("Directory created: "));
+    Serial.println(argv[2]);
+    return;
+  }
+
+  if (equalsIgnoreCase(argv[1], "touch")) {
+    if (argc != 3) {
+      Serial.println(F("Usage: fs touch <path>"));
+      return;
+    }
+
+    char parentPath[kCmdBufferSize];
+    char leaf[kFsNameBytes];
+    if (!fsSplitParentLeaf(argv[2], parentPath, sizeof(parentPath), leaf, sizeof(leaf))) {
+      Serial.println(F("Invalid path."));
+      return;
+    }
+
+    uint8_t parentIndex = kFsRootParent;
+    FsEntry parentEntry;
+    if (!fsResolveDirectory(parentPath, parentIndex, parentEntry)) {
+      Serial.println(F("Parent directory does not exist."));
+      return;
+    }
+
+    uint8_t nodeIndex = 0;
+    FsEntry nodeEntry;
+    if (fsFindChild(parentIndex, leaf, nodeIndex, nodeEntry)) {
+      if (nodeEntry.isDir) {
+        Serial.println(F("Path exists as directory."));
+        return;
+      }
+      Serial.println(F("File already exists."));
+      return;
+    }
+
+    if (!fsFindFreeEntry(nodeIndex)) {
+      Serial.println(F("FS entry table full."));
+      return;
+    }
+
+    FsEntry newEntry;
+    newEntry.used = true;
+    newEntry.isDir = false;
+    newEntry.parent = parentIndex;
+    strncpy(newEntry.name, leaf, kFsNameBytes - 1);
+    newEntry.name[kFsNameBytes - 1] = '\0';
+    fsStoreEntry(nodeIndex, newEntry);
+    Serial.print(F("File created: "));
+    Serial.println(argv[2]);
+    return;
+  }
+
+  if (equalsIgnoreCase(argv[1], "write")) {
+    // Parse path + raw text from the original command to preserve text case and spacing.
+    const char *p = rawLine;
+    while (*p != '\0' && isspace(static_cast<unsigned char>(*p))) {
+      ++p;
+    }
+    while (*p != '\0' && !isspace(static_cast<unsigned char>(*p))) {
+      ++p; // fs
+    }
+    while (*p != '\0' && isspace(static_cast<unsigned char>(*p))) {
+      ++p;
+    }
+    while (*p != '\0' && !isspace(static_cast<unsigned char>(*p))) {
+      ++p; // write
+    }
+    while (*p != '\0' && isspace(static_cast<unsigned char>(*p))) {
+      ++p;
+    }
+    if (*p == '\0') {
+      Serial.println(F("Usage: fs write <path> <text>"));
+      return;
+    }
+
+    const char *pathStart = p;
+    while (*p != '\0' && !isspace(static_cast<unsigned char>(*p))) {
+      ++p;
+    }
+    const size_t pathLen = static_cast<size_t>(p - pathStart);
+    if (pathLen == 0 || pathLen >= kCmdBufferSize) {
+      Serial.println(F("Invalid path."));
+      return;
+    }
+
+    char path[kCmdBufferSize];
+    memcpy(path, pathStart, pathLen);
+    path[pathLen] = '\0';
+
+    while (*p != '\0' && isspace(static_cast<unsigned char>(*p))) {
+      ++p;
+    }
+    const char *text = p; // May be empty.
+    const size_t textLen = strlen(text);
+
+    char parentPath[kCmdBufferSize];
+    char leaf[kFsNameBytes];
+    if (!fsSplitParentLeaf(path, parentPath, sizeof(parentPath), leaf, sizeof(leaf))) {
+      Serial.println(F("Invalid path."));
+      return;
+    }
+
+    uint8_t parentIndex = kFsRootParent;
+    FsEntry parentEntry;
+    if (!fsResolveDirectory(parentPath, parentIndex, parentEntry)) {
+      Serial.println(F("Parent directory does not exist."));
+      return;
+    }
+
+    uint8_t nodeIndex = 0;
+    FsEntry nodeEntry;
+    bool exists = fsFindChild(parentIndex, leaf, nodeIndex, nodeEntry);
+    if (exists && nodeEntry.isDir) {
+      Serial.println(F("Path exists as directory."));
+      return;
+    }
+    if (!exists) {
+      if (!fsFindFreeEntry(nodeIndex)) {
+        Serial.println(F("FS entry table full."));
+        return;
+      }
+      nodeEntry.used = true;
+      nodeEntry.isDir = false;
+      nodeEntry.parent = parentIndex;
+      strncpy(nodeEntry.name, leaf, kFsNameBytes - 1);
+      nodeEntry.name[kFsNameBytes - 1] = '\0';
+    }
+
+    if (textLen == 0) {
+      nodeEntry.dataLen = 0;
+      nodeEntry.dataStart = 0;
+      fsStoreEntry(nodeIndex, nodeEntry);
+      Serial.print(F("Wrote 0 bytes to "));
+      Serial.println(path);
+      return;
+    }
+
+    const size_t size = eepromSize();
+    const uint16_t nextFree = fsNextFree();
+    if (nextFree > size || textLen > (size - nextFree)) {
+      Serial.println(F("Not enough EEPROM data space. Run 'fs format confirm'."));
+      return;
+    }
+
+    for (size_t i = 0; i < textLen; ++i) {
+      EEPROM.update(static_cast<int>(nextFree + i), static_cast<uint8_t>(text[i]));
+    }
+
+    nodeEntry.dataStart = nextFree;
+    nodeEntry.dataLen = static_cast<uint16_t>(textLen);
+    fsStoreEntry(nodeIndex, nodeEntry);
+    fsSetNextFree(static_cast<uint16_t>(nextFree + textLen));
+
+    Serial.print(F("Wrote "));
+    Serial.print(textLen);
+    Serial.print(F(" byte(s) to "));
+    Serial.println(path);
+    return;
+  }
+
+  if (equalsIgnoreCase(argv[1], "rm")) {
+    if (argc != 3) {
+      Serial.println(F("Usage: fs rm <path>"));
+      return;
+    }
+
+    uint8_t nodeIndex = kFsRootParent;
+    FsEntry nodeEntry;
+    if (!fsResolvePath(argv[2], nodeIndex, nodeEntry) || nodeIndex == kFsRootParent) {
+      Serial.println(F("Path not found."));
+      return;
+    }
+    if (nodeEntry.isDir && fsHasChildren(nodeIndex)) {
+      Serial.println(F("Directory not empty."));
+      return;
+    }
+
+    fsClearEntry(nodeIndex);
+    Serial.print(F("Removed: "));
+    Serial.println(argv[2]);
+    return;
+  }
+
+  if (equalsIgnoreCase(argv[1], "stat")) {
+    if (argc != 2) {
+      Serial.println(F("Usage: fs stat"));
+      return;
+    }
+
+    uint8_t used = 0;
+    uint8_t dirs = 0;
+    uint8_t files = 0;
+    for (uint8_t i = 0; i < kFsMaxEntries; ++i) {
+      FsEntry entry;
+      fsLoadEntry(i, entry);
+      if (!entry.used) {
+        continue;
+      }
+      ++used;
+      if (entry.isDir) {
+        ++dirs;
+      } else {
+        ++files;
+      }
+    }
+
+    const size_t total = eepromSize();
+    const uint16_t nextFree = fsNextFree();
+    const size_t dataCapacity = total - kFsDataStart;
+    const size_t dataUsed = nextFree - kFsDataStart;
+    const size_t dataFree = total - nextFree;
+
+    Serial.println(F("\n=== FS Stat ==="));
+    Serial.print(F("Entries: "));
+    Serial.print(used);
+    Serial.print(F("/"));
+    Serial.println(kFsMaxEntries);
+    Serial.print(F("Dirs: "));
+    Serial.print(dirs);
+    Serial.print(F(", Files: "));
+    Serial.println(files);
+    Serial.print(F("Data start: 0x"));
+    printHexWord(kFsDataStart);
+    Serial.print(F(", next free: 0x"));
+    printHexWord(nextFree);
+    Serial.println();
+    Serial.print(F("Data used/free: "));
+    Serial.print(dataUsed);
+    Serial.print(F("/"));
+    Serial.print(dataCapacity);
+    Serial.print(F(" bytes (free "));
+    Serial.print(dataFree);
+    Serial.println(F(")"));
+    Serial.println(F("==============\n"));
+    return;
+  }
+
+  Serial.println(F("Unknown fs command. Use 'fs help'."));
+}
+
 void handleCommand(char *line) {
   char raw[kCmdBufferSize];
   strncpy(raw, line, kCmdBufferSize - 1);
@@ -668,6 +1433,14 @@ void handleCommand(char *line) {
 
   if (trimmed[0] == '\0') {
     return;
+  }
+
+  if (startsWithIgnoreCase(trimmed, "fs")) {
+    const char next = trimmed[2];
+    if (next == '\0' || isspace(static_cast<unsigned char>(next))) {
+      handleFsCommand(trimmed);
+      return;
+    }
   }
 
   char cmd[kCmdBufferSize];
@@ -1746,6 +2519,7 @@ void updateSerial() {
 
 void setup() {
   captureResetFlags();
+  fsEnsureInitialized();
 
   Serial.begin(kBaudRate);
   Wire.begin();
