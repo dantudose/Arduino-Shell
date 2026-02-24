@@ -18,8 +18,6 @@ uint32_t gI2cClockHz = kI2cSpeed100kHz;
 #endif
 
 const char kEepromEraseToken[] = "confirm";
-const char kPrompt[] = "arduino$ ";
-const char kBoardName[] = "ATmega328P Xplained Mini";
 
 char gCmdBuffer[kCmdBufferSize];
 size_t gCmdLen = 0;
@@ -31,7 +29,7 @@ char gEditBackup[kCmdBufferSize];
 size_t gEditBackupLen = 0;
 EscState gEscState = EscState::None;
 
-void printPrompt() { Serial.print(kPrompt); }
+void printPrompt() { Serial.print(F("arduino$ ")); }
 
 void print2Digits(uint32_t value) {
   if (value < 10) {

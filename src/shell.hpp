@@ -35,8 +35,6 @@ constexpr uint16_t kFsEntryTableOffset = kFsHeaderSize;
 constexpr uint16_t kFsDataStart =
     kFsEntryTableOffset + (static_cast<uint16_t>(kFsMaxEntries) * kFsEntrySize);
 constexpr uint8_t kUserAnalogCount = 6;
-extern const char kPrompt[];
-extern const char kBoardName[];
 
 #ifndef FW_VERSION
 #define FW_VERSION "1.1.0"
@@ -194,5 +192,7 @@ bool handleGpioCommand(char *argv[], size_t argc);
 bool handleLowLevelCommand(char *argv[], size_t argc);
 void handleCommand(char *line);
 void updateSerial();
+void startupScriptInit();
+void updateBackgroundTasks();
 
 } // namespace shell

@@ -107,7 +107,7 @@ void handleCommand(char *line) {
     Serial.write(' ');
     Serial.println(F(__TIME__));
     Serial.print(F("Board: "));
-    Serial.println(kBoardName);
+    Serial.println(F("ATmega328P Xplained Mini"));
     Serial.print(F("MCU: "));
     Serial.println(F("ATmega328P"));
     Serial.print(F("F_CPU: "));
@@ -127,7 +127,7 @@ void handleCommand(char *line) {
     uint8_t sig[3] = {0, 0, 0};
     readDeviceSignature(sig);
     Serial.print(F("Board: "));
-    Serial.println(kBoardName);
+    Serial.println(F("ATmega328P Xplained Mini"));
     Serial.print(F("Device ID: 0x"));
     printHexByte(sig[0]);
     printHexByte(sig[1]);

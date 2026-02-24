@@ -4,6 +4,7 @@ void setup() {
   shell::captureResetFlags();
 #if FEATURE_FS
   shell::fsEnsureInitialized();
+  shell::startupScriptInit();
 #endif
 
   Serial.begin(shell::kBaudRate);
@@ -26,4 +27,7 @@ void setup() {
   shell::printPrompt();
 }
 
-void loop() { shell::updateSerial(); }
+void loop() {
+  shell::updateBackgroundTasks();
+  shell::updateSerial();
+}
