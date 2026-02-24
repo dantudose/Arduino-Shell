@@ -1,6 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2026 Dan Tudose
-
 #include "shell.hpp"
 
 namespace shell {
