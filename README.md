@@ -8,7 +8,7 @@ The project provides:
 - EEPROM-backed mini filesystem (`fs ...`)
 - Startup script support (`/scripts/boot.sh`) with background LED blink task
 
-![ARDUINO](./lib/shell.png)
+![ARDUINO](./lib/shell.png?200)
 
 
 ## Hardware/Platform
