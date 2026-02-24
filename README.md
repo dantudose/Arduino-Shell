@@ -1,13 +1,15 @@
 # Arduino Command Shell
 
 Serial command shell firmware for the **ATmega328P Xplained Mini** (Arduino/MiniCore on PlatformIO).
-![ARDUINO](./lib/shell.png)
 
 The project provides:
 - Interactive UART shell (`arduino$ ` prompt)
 - GPIO, timing, I2C, EEPROM, and low-level AVR register commands
 - EEPROM-backed mini filesystem (`fs ...`)
 - Startup script support (`/scripts/boot.sh`) with background LED blink task
+
+![ARDUINO](./lib/shell.png)
+
 
 ## Hardware/Platform
 
