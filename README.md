@@ -227,12 +227,12 @@ Supported script syntax right now:
 
 ## Safety / Caveats
 
-- `peek`/`poke` are intentionally dangerous and can crash the MCU.
+- `peek`/`poke` are intentionally dangerous and can crash the MCU. Use at your own risk.
 - `reset` triggers watchdog reset immediately.
 - `watch` and `pulse` can be interrupted with any key.
 - If terminal output looks like garbage, check baud is `57600`.
 
-## Typical First Run
+## Some Commands
 
 ```text
 help
