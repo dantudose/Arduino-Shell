@@ -8,6 +8,16 @@ namespace shell {
 
 namespace {
 
+const __FlashStringHelper *selectedBoardName() {
+#if defined(ARDUINO_AVR_UNO)
+  return F("Arduino Uno");
+#elif defined(ARDUINO_AVR_ATmega328P)
+  return F("ATmega328P Xplained Mini");
+#else
+  return F("ATmega328P-compatible board");
+#endif
+}
+
 void normalize(char *s) {
   size_t w = 0;
   bool prevSpace = true;
@@ -107,7 +117,7 @@ void handleCommand(char *line) {
     Serial.write(' ');
     Serial.println(F(__TIME__));
     Serial.print(F("Board: "));
-    Serial.println(F("ATmega328P Xplained Mini"));
+    Serial.println(selectedBoardName());
     Serial.print(F("MCU: "));
     Serial.println(F("ATmega328P"));
     Serial.print(F("F_CPU: "));
@@ -127,7 +137,7 @@ void handleCommand(char *line) {
     uint8_t sig[3] = {0, 0, 0};
     readDeviceSignature(sig);
     Serial.print(F("Board: "));
-    Serial.println(F("ATmega328P Xplained Mini"));
+    Serial.println(selectedBoardName());
     Serial.print(F("Device ID: 0x"));
     printHexByte(sig[0]);
     printHexByte(sig[1]);

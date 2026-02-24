@@ -45,19 +45,23 @@ Examples below use the explicit binary path:
 Build:
 
 ```bash
-$PIO run -e ATmega328P
+$PIO run -e avr
 ```
+
+To target a different board, change `platformio.ini`:
+- `[target] board = atmega328p_xplained_mini`
+- or `[target] board = uno`
 
 Upload:
 
 ```bash
-$PIO run -e ATmega328P -t upload
+$PIO run -e avr -t upload
 ```
 
 Open monitor:
 
 ```bash
-$PIO device monitor -e ATmega328P
+$PIO device monitor -e avr
 ```
 
 If you prefer plain monitor command, keep baud at `57600`.
@@ -75,6 +79,16 @@ In `[features]` (0 = disabled, 1 = enabled):
 - `feature_lowlevel`
 
 These map to compile-time flags (`FEATURE_*`) in `build_flags`.
+
+### Board selection
+
+Use a single environment and switch board in `[target]`:
+
+```ini
+[target]
+board = atmega328p_xplained_mini
+; board = uno
+```
 
 ### Firmware/version/baud
 

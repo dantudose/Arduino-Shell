@@ -67,7 +67,7 @@ void printHelp() {
 }
 
 void printStatus() {
-  Serial.println(F("\n=== Xplained Mini Status ==="));
+  Serial.println(F("\n=== Board Status ==="));
   Serial.print(F("Uptime [ms]: "));
   const uint32_t upMs = millis();
   Serial.print(upMs);

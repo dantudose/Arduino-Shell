@@ -14,7 +14,7 @@ void setup() {
 #endif
   delay(200);
 
-  Serial.println(F("\nATmega328P Xplained Mini command shell"));
+  Serial.println(F("\nArduino command shell"));
   Serial.println(F("By: Dan Tudose"));
   Serial.print(F("Version: "));
   Serial.println(FW_VERSION);
