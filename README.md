@@ -1,6 +1,9 @@
 # Arduino Command Shell
 
-Serial command shell firmware for the **ATmega328P Xplained Mini** (Arduino/MiniCore on PlatformIO).
+Serial command shell firmware for **ATmega328P boards** on PlatformIO.
+Current board targets:
+- **ATmega328P Xplained Mini**
+- **Arduino Uno**
 
 The project provides:
 - Interactive UART shell (`arduino$ ` prompt)
@@ -13,11 +16,17 @@ The project provides:
 
 ## Hardware/Platform
 
-- Board: ATmega328P Xplained Mini
-- MCU clock: 16 MHz
-- Framework: Arduino (MiniCore)
-- Upload protocol: `xplainedmini_isp` (EDBG over USB)
+- MCU: ATmega328P @ 16 MHz
+- Framework: Arduino
 - Serial monitor baud: **57600**
+
+Supported board definitions:
+- `atmega328p_xplained_mini`
+  - Uses custom board file: `boards/atmega328p_xplained_mini.json`
+  - Typical upload: `xplainedmini_isp` (EDBG over USB)
+- `uno`
+  - Uses PlatformIO built-in Arduino Uno board definition
+  - Typical upload: Optiboot serial bootloader (`arduino` protocol)
 
 ## Project Layout
 
@@ -42,15 +51,19 @@ Examples below use the explicit binary path:
 
 ## Build / Upload / Monitor
 
-Build:
+Select board in `platformio.ini` first:
+
+```ini
+[target]
+board = atmega328p_xplained_mini
+; board = uno
+```
+
+Build (single environment):
 
 ```bash
 $PIO run -e avr
 ```
-
-To target a different board, change `platformio.ini`:
-- `[target] board = atmega328p_xplained_mini`
-- or `[target] board = uno`
 
 Upload:
 
@@ -65,6 +78,10 @@ $PIO device monitor -e avr
 ```
 
 If you prefer plain monitor command, keep baud at `57600`.
+
+Notes:
+- `ver` and `id` print board name based on the selected target.
+- Upload transport is board-dependent (EDBG ISP for Xplained Mini, serial bootloader for Uno).
 
 ## Configuration (platformio.ini)
 
@@ -90,6 +107,8 @@ board = atmega328p_xplained_mini
 ; board = uno
 ```
 
+The selected board also controls compile-time board identification used by shell commands (`ver`, `id`).
+
 ### Firmware/version/baud
 
 - `-DFW_VERSION="1.1.0"`
@@ -99,7 +118,7 @@ board = atmega328p_xplained_mini
 
 `board_hardware.eesave = yes` is enabled.
 
-This keeps EEPROM content across firmware uploads (including chip erase operations), unless you explicitly clear/write EEPROM or change fuses.
+This keeps EEPROM content across uploads that involve chip erase operations (notably ISP flows). For Uno serial bootloader uploads, EEPROM is typically preserved as well unless explicitly erased by tooling or firmware commands.
 
 ## Shell Usage
 
