@@ -1,6 +1,7 @@
 # Arduino Command Shell
 
 Serial command shell firmware for the **ATmega328P Xplained Mini** (Arduino/MiniCore on PlatformIO).
+![ARDUINO](./lib/shell.png)
 
 The project provides:
 - Interactive UART shell (`arduino$ ` prompt)
