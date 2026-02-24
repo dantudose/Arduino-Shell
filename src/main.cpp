@@ -1,5 +1,6 @@
 
 #include <Arduino.h>
+#include <EEPROM.h>
 #include <Wire.h>
 #include <avr/boot.h>
 #include <avr/wdt.h>
@@ -28,6 +29,8 @@ constexpr uint16_t kMaxFreqWindowMs = 10000;
 constexpr uint8_t kI2cMaxTransferLen = 32; // Wire buffer limit on AVR
 constexpr uint32_t kI2cSpeed100kHz = 100000UL;
 constexpr uint32_t kI2cSpeed400kHz = 400000UL;
+constexpr uint8_t kEepromEraseValue = 0xFF;
+constexpr char kEepromEraseToken[] = "confirm";
 constexpr uint8_t kUserAnalogCount = 6; // A0..A5 for this shell
 constexpr char kPrompt[] = "arduino$ ";
 constexpr char kBoardName[] = "ATmega328P Xplained Mini";
@@ -260,6 +263,32 @@ bool parseI2cLen(const char *token, uint8_t &length) {
     return false;
   }
   length = static_cast<uint8_t>(raw);
+  return true;
+}
+
+size_t eepromSize() { return static_cast<size_t>(EEPROM.length()); }
+
+bool parseEepromAddress(const char *token, uint16_t &address) {
+  unsigned long raw = 0;
+  if (!parseUnsignedAuto(token, raw)) {
+    return false;
+  }
+
+  const size_t size = eepromSize();
+  if (raw >= size) {
+    return false;
+  }
+
+  address = static_cast<uint16_t>(raw);
+  return true;
+}
+
+bool parseEepromLen(const char *token, size_t &length) {
+  unsigned long raw = 0;
+  if (!parseUnsignedAuto(token, raw) || raw == 0) {
+    return false;
+  }
+  length = static_cast<size_t>(raw);
   return true;
 }
 
@@ -560,6 +589,9 @@ void printHelp() {
   Serial.println(F("  i2cwrite <addr> <bytes...>"));
   Serial.println(F("  i2cwr <addr> <reg> <bytes...>"));
   Serial.println(F("  i2crr <addr> <reg> <n>"));
+  Serial.println(F("  eepread <addr> [len]"));
+  Serial.println(F("  eepwrite <addr> <bytes...>"));
+  Serial.println(F("  eeperase confirm    - clear EEPROM"));
   Serial.println(F("  pinmode <pin> <in|out|pullup>"));
   Serial.println(F("  digitalread <pin>"));
   Serial.println(F("  digitalwrite <pin> <0|1>"));
@@ -989,6 +1021,118 @@ void handleCommand(char *line) {
       Serial.print(length);
       Serial.println(F(")."));
     }
+    return;
+  }
+
+  if (argc > 0 && strcmp(argv[0], "eepread") == 0) {
+    if (argc != 2 && argc != 3) {
+      Serial.println(F("Usage: eepread <addr> [len]"));
+      return;
+    }
+
+    const size_t size = eepromSize();
+    uint16_t address = 0;
+    if (!parseEepromAddress(argv[1], address)) {
+      Serial.print(F("Invalid EEPROM address. Use 0.."));
+      Serial.println(size - 1);
+      return;
+    }
+
+    size_t length = 1;
+    if (argc == 3 && !parseEepromLen(argv[2], length)) {
+      Serial.println(F("Invalid length. Use >= 1."));
+      return;
+    }
+
+    const size_t start = static_cast<size_t>(address);
+    if (length > (size - start)) {
+      Serial.println(F("Read range exceeds EEPROM."));
+      return;
+    }
+
+    Serial.print(F("EEPROM read "));
+    Serial.print(length);
+    Serial.print(F(" byte(s) @ 0x"));
+    printHexWord(address);
+    Serial.println();
+
+    for (size_t i = 0; i < length; ++i) {
+      const size_t index = start + i;
+      if ((i % 16) == 0) {
+        Serial.print(F("0x"));
+        printHexWord(static_cast<uint16_t>(index));
+        Serial.print(F(":"));
+      }
+
+      Serial.write(' ');
+      printHexByte(EEPROM.read(static_cast<int>(index)));
+
+      if ((i % 16) == 15 || (i + 1) == length) {
+        Serial.println();
+      }
+    }
+    return;
+  }
+
+  if (argc > 0 && strcmp(argv[0], "eepwrite") == 0) {
+    if (argc < 3) {
+      Serial.println(F("Usage: eepwrite <addr> <bytes...>"));
+      return;
+    }
+
+    const size_t size = eepromSize();
+    uint16_t address = 0;
+    if (!parseEepromAddress(argv[1], address)) {
+      Serial.print(F("Invalid EEPROM address. Use 0.."));
+      Serial.println(size - 1);
+      return;
+    }
+
+    const size_t start = static_cast<size_t>(address);
+    const size_t dataLen = argc - 2;
+    if (dataLen > (size - start)) {
+      Serial.println(F("Write range exceeds EEPROM."));
+      return;
+    }
+
+    uint8_t data[kMaxArgs] = {};
+    for (size_t i = 0; i < dataLen; ++i) {
+      if (!parseByteValue(argv[2 + i], data[i])) {
+        Serial.print(F("Invalid byte: "));
+        Serial.println(argv[2 + i]);
+        return;
+      }
+    }
+
+    for (size_t i = 0; i < dataLen; ++i) {
+      EEPROM.update(static_cast<int>(start + i), data[i]);
+    }
+
+    Serial.print(F("EEPROM wrote "));
+    Serial.print(dataLen);
+    Serial.print(F(" byte(s) @ 0x"));
+    printHexWord(address);
+    Serial.println();
+    return;
+  }
+
+  if (argc > 0 && strcmp(argv[0], "eeperase") == 0) {
+    if (argc != 2 || strcmp(argv[1], kEepromEraseToken) != 0) {
+      Serial.print(F("Usage: eeperase "));
+      Serial.println(kEepromEraseToken);
+      return;
+    }
+
+    const size_t size = eepromSize();
+    for (size_t i = 0; i < size; ++i) {
+      EEPROM.update(static_cast<int>(i), kEepromEraseValue);
+    }
+
+    Serial.print(F("EEPROM cleared to 0x"));
+    printHexByte(kEepromEraseValue);
+    Serial.print(F(" ("));
+    Serial.print(size);
+    Serial.println(F(" bytes)."));
     return;
   }
 
